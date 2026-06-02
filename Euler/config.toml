@@ -1,10 +1,10 @@
 # Cas test: "bump" | "diamond"
-case = "diamond"
+case = "bump"
 
 # Physique
 rho_inf = 1.0
 p_inf = 1.0
-Mach = 1.2
+Mach = 1.3
 gamma = 1.4
 aoa = 2.0
 
@@ -21,7 +21,7 @@ stationarity_threshold = 2e-6
 stationarity_check_every = 100
 
 # Maillage
-mesh_path = "meshes/diamond/diamond_h0.05.npy"
+mesh_path = "meshes/bump/bump_h0.02.npy"
 
 [export]
 # results: true/false
