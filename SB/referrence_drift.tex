@@ -1,0 +1,471 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{hyperref}
+
+\newtheorem{proposition}{Proposition}
+\newtheorem{assumption}{Assumption}
+\theoremstyle{remark}
+\newtheorem{remark}{Remark}
+
+\newcommand{\R}{\mathbf{R}}
+\newcommand{\xv}{\mathbf{x}}
+\newcommand{\bt}{\boldsymbol{\beta}}
+\newcommand{\dhat}{\hat{\mathbf{d}}}
+\newcommand{\av}{\mathbf{a}}
+\newcommand{\grad}{\nabla}
+\newcommand{\dive}{\grad\!\cdot\!}
+\newcommand{\Rd}{\mathbb{R}^d}
+
+\title{\textbf{Schr\"odinger Bridges with a Reference Drift,\\
+and an Analytic Shock-Rotation Drift for a Diamond Airfoil}}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We formulate the Schr\"odinger-bridge problem as a constrained minimization of
+kinetic energy, derive its optimality system and Hopf--Cole linearization, and
+express the solution through log-potentials and the iterative proportional
+fitting procedure (IPFP). We then extend the formulation to a reference diffusion
+carrying a macroscopic drift $\bt$, obtaining transport--diffusion equations for
+the Hopf--Cole potentials. Finally we construct an explicit drift $\bt$ for the
+compressible flow past a diamond airfoil, built from the oblique-shock geometry,
+that transports the shock structure between two operating conditions.
+\end{abstract}
+
+\tableofcontents
+
+% =====================================================================
+\section{Notation}
+
+Vectors lie in $\Rd$ (with $d=2$ in the application); $\|\cdot\|$ is the
+Euclidean norm. The symbol $\gamma$ denotes the diffusion (entropic
+regularization) coefficient of the bridge; in Section~\ref{sec:diamond} the
+ratio of specific heats of the gas is written $\gamma_g$ to keep the two
+distinct.
+
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}>{$}l<{$}p{0.76\linewidth}@{}}
+\toprule
+\text{Symbol} & Meaning \\
+\midrule
+\mu,\nu & initial and terminal marginals, $\mu,\nu\in\mathcal{P}(\Rd)$ \\
+t & time, rescaled to $[0,1]$ \\
+\rho_t(\xv) & density at time $t$; $\rho_0=\mu$, $\rho_1=\nu$ \\
+b_t(\xv) & control (velocity) field \\
+\gamma & diffusion coefficient of the bridge \\
+\mathcal{J} & kinetic-energy functional \\
+\phi_t(\xv) & Lagrange multiplier / value function \\
+\eta_t,\ \eta^\ast_t & forward / backward Hopf--Cole wave functions, $\rho_t=\eta_t\eta^\ast_t$ \\
+f_t=\log\eta_t,\ g_t=\log\eta^\ast_t & log-potentials \\
+\mathcal{P}_\tau & heat semigroup $e^{\tau\gamma\Delta}$ (Neumann BC) \\
+\bt_t(\xv) & reference drift of the underlying diffusion \\
+\mathcal{Q}_\tau,\ \mathcal{Q}_\tau^{\dagger} & reference transition operator and its adjoint \\
+\alpha & wedge half-angle of the diamond \\
+\gamma_g & ratio of specific heats of the gas \\
+M & freestream Mach number; $M_0,M_1$ its endpoint values \\
+\theta_{\mathrm{LE}},\theta_{\mathrm{TE}} & flow-deflection angles at leading / trailing edge \\
+\beta_s & oblique-shock wave angle \\
+\nu(\cdot) & Prandtl--Meyer function \\
+\av_{\mathrm{LE}},\av_{\mathrm{TE}} & leading- / trailing-edge apex (pivot) points \\
+\sigma\in\{+1,-1\} & surface index (upper / lower) \\
+\kappa\in\{\mathrm{LE},\mathrm{TE}\} & shock-family index \\
+\R & the rotation matrix $\left(\begin{smallmatrix}0&-1\\1&0\end{smallmatrix}\right)$ \\
+M_0(\xv),M_1(\xv) & endpoint Mach fields on the mesh (the quantities interpolated) \\
+T,\ S & forward ($\mu\!\to\!\nu$) and backward ($\nu\!\to\!\mu$) barycentric transport maps \\
+\widehat M(t,\xv) & CDI-reconstructed Mach field at time $t$ \\
+\mathrm{id}(\xv)=\xv & the identity (coordinate) map on the mesh \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% =====================================================================
+\section{The Schr\"odinger problem}
+\label{sec:sb}
+
+Let $\mu,\nu\in\mathcal{P}(\Rd)$ be two probability measures and $\gamma>0$. The
+dynamic Schr\"odinger problem seeks a density--velocity pair
+$(\rho_t,b_t)_{t\in[0,1]}$ minimizing the expected kinetic energy
+\begin{equation}
+\label{eq:J}
+\mathcal{J}(\rho,b)=\int_0^1\!\!\int_{\Rd}\tfrac12\,\|b_t(\xv)\|^2\,\rho_t(\xv)\,d\xv\,dt,
+\end{equation}
+subject to the Fokker--Planck constraint and the temporal boundary conditions
+\begin{equation}
+\label{eq:FP}
+\partial_t\rho_t + \dive(\rho_t b_t) = \gamma\,\Delta\rho_t,
+\qquad \rho_0=\mu,\quad \rho_1=\nu.
+\end{equation}
+Equivalently, $(\rho,b)$ is the law of the controlled diffusion
+$dX_t=b_t(X_t)\,dt+\sqrt{2\gamma}\,dW_t$ that is closest, in relative entropy, to
+the reference Brownian motion of the same intensity; by Girsanov's theorem the
+relative entropy equals $\mathcal{J}/(2\gamma)$.
+
+% =====================================================================
+\section{Optimality system and linearization}
+\label{sec:opt}
+
+\subsection{Euler--Lagrange equations}
+Introduce the multiplier $\phi_t(\xv)$ for the constraint \eqref{eq:FP} and form
+\begin{equation}
+\label{eq:Lag}
+\mathcal{L}(\rho,b,\phi)=\int_0^1\!\!\int_{\Rd}\tfrac12\|b_t\|^2\rho_t\,d\xv\,dt
++\int_0^1\!\!\int_{\Rd}\phi_t\bigl(\partial_t\rho_t+\dive(\rho_t b_t)-\gamma\Delta\rho_t\bigr)\,d\xv\,dt.
+\end{equation}
+
+\paragraph{Variation in $b$.}
+\begin{equation}
+\delta_b\mathcal{L}=\int_0^1\!\!\int_{\Rd}\rho_t\,b_t\cdot\delta b_t\,d\xv\,dt
++\int_0^1\!\!\int_{\Rd}\phi_t\,\dive(\rho_t\,\delta b_t)\,d\xv\,dt .
+\end{equation}
+Integrating the second term by parts (no-flux boundary), $\int\phi\,\dive(\rho\,\delta b)=-\int\rho\,\grad\phi\cdot\delta b$, gives $\int_0^1\!\!\int\rho_t(b_t-\grad\phi_t)\cdot\delta b_t=0$. Since $\rho_t>0$ and $\delta b_t$ is arbitrary,
+\begin{equation}
+\label{eq:bopt}
+b_t=\grad\phi_t .
+\end{equation}
+
+\paragraph{Variation in $\rho$ (with $\delta\rho_0=\delta\rho_1=0$).}
+Integrating by parts in time, in the advection term, and twice in the diffusion term (self-adjointness of $\Delta$),
+\begin{equation}
+\delta_\rho\mathcal{L}=\int_0^1\!\!\int_{\Rd}\Bigl(\tfrac12\|b_t\|^2-\partial_t\phi_t-b_t\cdot\grad\phi_t-\gamma\Delta\phi_t\Bigr)\delta\rho_t\,d\xv\,dt=0,
+\end{equation}
+whence $\partial_t\phi_t+b_t\cdot\grad\phi_t+\gamma\Delta\phi_t-\tfrac12\|b_t\|^2=0$. Substituting \eqref{eq:bopt} yields the Hamilton--Jacobi--Bellman equation
+\begin{equation}
+\label{eq:HJB}
+\partial_t\phi_t+\tfrac12\|\grad\phi_t\|^2+\gamma\,\Delta\phi_t=0 .
+\end{equation}
+The optimality system is \eqref{eq:HJB} coupled to \eqref{eq:FP} with $b_t=\grad\phi_t$.
+
+\subsection{Hopf--Cole linearization}
+Define the backward wave function
+\begin{equation}
+\label{eq:etastar}
+\eta^\ast_t(\xv)=\exp\!\Bigl(\frac{\phi_t(\xv)}{2\gamma}\Bigr),
+\qquad \grad\phi_t=2\gamma\,\frac{\grad\eta^\ast_t}{\eta^\ast_t}.
+\end{equation}
+A direct computation, using $\Delta\eta^\ast=\tfrac{\eta^\ast}{4\gamma^2}\|\grad\phi\|^2+\tfrac{\eta^\ast}{2\gamma}\Delta\phi$ and \eqref{eq:HJB}, gives the backward heat equation
+\begin{equation}
+\label{eq:heatstar}
+\partial_t\eta^\ast_t=-\gamma\,\Delta\eta^\ast_t .
+\end{equation}
+Introduce the forward wave function through the factorization $\rho_t=\eta_t\eta^\ast_t$. With $b_t=2\gamma\grad\log\eta^\ast_t$ the Fokker--Planck equation \eqref{eq:FP} becomes
+\begin{equation}
+\partial_t(\eta\eta^\ast)+2\gamma\,\dive(\eta\grad\eta^\ast)=\gamma\Delta(\eta\eta^\ast);
+\end{equation}
+expanding and using \eqref{eq:heatstar} to cancel the terms in $\eta^\ast$ leaves the forward heat equation
+\begin{equation}
+\label{eq:heat}
+\partial_t\eta_t=\gamma\,\Delta\eta_t .
+\end{equation}
+The two linear equations are coupled only through the temporal boundary
+conditions (the Schr\"odinger system)
+\begin{equation}
+\label{eq:schrsys}
+\eta_0(\xv)\,\eta^\ast_0(\xv)=\mu(\xv),\qquad
+\eta_1(\xv)\,\eta^\ast_1(\xv)=\nu(\xv).
+\end{equation}
+
+\subsection{Log-potentials and IPFP}
+Set $f_t=\log\eta_t$, $g_t=\log\eta^\ast_t$, so that
+\begin{equation}
+\rho_t=e^{f_t+g_t},\qquad b_t=2\gamma\,\grad g_t .
+\end{equation}
+Let $\mathcal{P}_\tau=e^{\tau\gamma\Delta}$ be the heat semigroup with homogeneous
+Neumann boundary conditions. Forward and backward propagation give
+$\eta_1=\mathcal{P}_1\eta_0$ and $\eta^\ast_0=\mathcal{P}_1\eta^\ast_1$; writing
+$f:=\log\eta_0$ and $g:=\log\eta^\ast_1$, the system \eqref{eq:schrsys} reads
+$f+\log\mathcal{P}_1[e^{g}]=\log\mu$ and $g+\log\mathcal{P}_1[e^{f}]=\log\nu$.
+The iterative proportional fitting procedure (IPFP; Sinkhorn in log form) solves
+these by alternation:
+\begin{equation}
+\label{eq:ipfp}
+g^{(k+1)}=\log\nu-\log\mathcal{P}_1\!\bigl[e^{f^{(k)}}\bigr],
+\qquad
+f^{(k+1)}=\log\mu-\log\mathcal{P}_1\!\bigl[e^{g^{(k+1)}}\bigr].
+\end{equation}
+At convergence the flow is recovered by heat propagation of the endpoint
+potentials, $\rho_t=\eta_t\eta^\ast_t$ and $b_t=2\gamma\grad\log\eta^\ast_t$.
+
+% =====================================================================
+\section{Reference process with a drift}
+\label{sec:drift}
+
+\subsection{Modified problem and optimality system}
+Let the underlying diffusion carry a prescribed macroscopic drift
+$\bt_t(\xv)$,
+\begin{equation}
+\label{eq:refSDE}
+dX_t=\bt_t(X_t)\,dt+\sqrt{2\gamma}\,dW_t,
+\end{equation}
+and penalize deviation of the control from this reference (Girsanov):
+\begin{equation}
+\label{eq:Jdrift}
+\mathcal{J}(\rho,b)=\int_0^1\!\!\int_{\Rd}\tfrac12\,\|b_t(\xv)-\bt_t(\xv)\|^2\,\rho_t(\xv)\,d\xv\,dt,
+\end{equation}
+under the same constraint \eqref{eq:FP}. Varying the corresponding Lagrangian in
+$b$ gives the optimal control
+\begin{equation}
+\label{eq:boptdrift}
+b_t=\bt_t+\grad\phi_t,
+\end{equation}
+and varying in $\rho$, followed by substitution of \eqref{eq:boptdrift}, gives the
+advected Hamilton--Jacobi--Bellman equation
+\begin{equation}
+\label{eq:HJBdrift}
+\partial_t\phi_t+\tfrac12\|\grad\phi_t\|^2+\bt_t\cdot\grad\phi_t+\gamma\,\Delta\phi_t=0 .
+\end{equation}
+
+\subsection{Transport--diffusion equations}
+With the same Hopf--Cole change of variables \eqref{eq:etastar}, equation
+\eqref{eq:HJBdrift} linearizes to the backward transport--diffusion equation
+\begin{equation}
+\label{eq:backdrift}
+\partial_t\eta^\ast_t+\bt_t\cdot\grad\eta^\ast_t+\gamma\,\Delta\eta^\ast_t=0 .
+\end{equation}
+The forward wave function is characterized as follows.
+
+\begin{proposition}
+\label{prop:forward}
+Let $\rho_t=\eta_t\eta^\ast_t$ solve \eqref{eq:FP} with optimal drift
+$b_t=\bt_t+2\gamma\,\grad\eta^\ast_t/\eta^\ast_t$, and let $\eta^\ast$ satisfy
+\eqref{eq:backdrift}. Then
+\begin{equation}
+\label{eq:forwarddrift}
+\partial_t\eta_t+\dive(\bt_t\,\eta_t)-\gamma\,\Delta\eta_t=0,
+\qquad\text{i.e.}\qquad
+\partial_t\eta_t+\bt_t\cdot\grad\eta_t+(\dive\bt_t)\,\eta_t-\gamma\,\Delta\eta_t=0 .
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+Insert $\rho=\eta\eta^\ast$ and $\rho b=\eta\eta^\ast\bt+2\gamma\,\eta\grad\eta^\ast$
+into \eqref{eq:FP} and expand:
+\begin{align*}
+\partial_t(\eta\eta^\ast)&=\eta^\ast\partial_t\eta+\eta\,\partial_t\eta^\ast,\\
+\dive(\eta\eta^\ast\bt)&=\eta^\ast\,\bt\cdot\grad\eta+\eta\,\bt\cdot\grad\eta^\ast+\eta\eta^\ast\,\dive\bt,\\
+2\gamma\,\dive(\eta\grad\eta^\ast)&=2\gamma\bigl(\grad\eta\cdot\grad\eta^\ast+\eta\,\Delta\eta^\ast\bigr),\\
+\gamma\,\Delta(\eta\eta^\ast)&=\gamma\bigl(\eta\,\Delta\eta^\ast+2\grad\eta\cdot\grad\eta^\ast+\eta^\ast\Delta\eta\bigr).
+\end{align*}
+Form $\partial_t\rho+\dive(\rho b)-\gamma\Delta\rho=0$ and eliminate
+$\partial_t\eta^\ast$ with \eqref{eq:backdrift}, i.e.
+$\eta\,\partial_t\eta^\ast=-\eta\,\bt\cdot\grad\eta^\ast-\gamma\,\eta\Delta\eta^\ast$.
+The terms $\eta\,\bt\cdot\grad\eta^\ast$ cancel; the terms
+$\grad\eta\cdot\grad\eta^\ast$ cancel ($+2\gamma-2\gamma$); and the terms
+$\eta\Delta\eta^\ast$ cancel ($-\gamma+2\gamma-\gamma$). What remains is
+$\eta^\ast\partial_t\eta+\eta^\ast\bt\cdot\grad\eta+\eta\eta^\ast\dive\bt-\gamma\eta^\ast\Delta\eta=0$;
+dividing by $\eta^\ast>0$ gives \eqref{eq:forwarddrift}.
+\end{proof}
+
+\begin{remark}
+The backward equation \eqref{eq:backdrift} carries the advection in
+non-conservative form $\bt\cdot\grad\eta^\ast$ (the generator
+$\mathcal{L}=\bt\cdot\grad+\gamma\Delta$), whereas the forward equation
+\eqref{eq:forwarddrift} carries it in conservative form $\dive(\bt\,\eta)$
+(the adjoint $\mathcal{L}^\ast$). The reaction term $(\dive\bt)\eta$ is therefore
+present whenever $\dive\bt\neq0$ and vanishes only for a divergence-free
+reference field.
+\end{remark}
+
+\subsection{Log-potentials and drifted IPFP}
+With $f_t=\log\eta_t$ and $g_t=\log\eta^\ast_t$, equations
+\eqref{eq:backdrift}--\eqref{eq:forwarddrift} become the coupled
+Hamilton--Jacobi equations
+\begin{align}
+\partial_t g_t+\bt_t\cdot\grad g_t+\gamma\,\Delta g_t+\gamma\,\|\grad g_t\|^2&=0,\\
+\partial_t f_t+\bt_t\cdot\grad f_t+(\dive\bt_t)-\gamma\,\Delta f_t-\gamma\,\|\grad f_t\|^2&=0.
+\end{align}
+Let $\mathcal{Q}_\tau=e^{\tau\mathcal{L}}$ be the transition operator of
+\eqref{eq:refSDE} (the non-conservative backward semigroup) and
+$\mathcal{Q}^{\dagger}_\tau=e^{\tau\mathcal{L}^\ast}$ its adjoint (the
+conservative forward semigroup). Propagation of the endpoint potentials gives
+$\eta^\ast_0=\mathcal{Q}_1\eta^\ast_1$ and $\eta_1=\mathcal{Q}^{\dagger}_1\eta_0$,
+and the IPFP reads
+\begin{equation}
+\label{eq:ipfpdrift}
+f^{(k+1)}=\log\mu-\log\mathcal{Q}_1\!\bigl[e^{g^{(k)}}\bigr],
+\qquad
+g^{(k+1)}=\log\nu-\log\mathcal{Q}^{\dagger}_1\!\bigl[e^{f^{(k+1)}}\bigr].
+\end{equation}
+When $\bt\equiv0$ both operators reduce to the heat semigroup $\mathcal{P}_1$ and
+\eqref{eq:ipfpdrift} returns \eqref{eq:ipfp}.
+
+\subsection{Recovery of the transport map}
+The bridge yields the forward map $T$ (the conditional mean under the coupling),
+\begin{equation}
+\label{eq:baryT}
+T(\xv)=\frac{\mathcal{Q}_1[\,\mathrm{id}\cdot e^{g}\,](\xv)}{\mathcal{Q}_1[e^{g}](\xv)}-\boldsymbol{\beta}_{\mathrm{bias}}(\xv),
+\qquad
+\boldsymbol{\beta}_{\mathrm{bias}}=\frac{\mathcal{Q}_1[\mathrm{id}]}{\mathcal{Q}_1[1]}-\mathrm{id},
+\end{equation}
+with an analogous backward map from $e^{f}$; $\boldsymbol{\beta}_{\mathrm{bias}}$
+removes the identity leak of the Neumann semigroup. Evaluated in the log domain,
+with a shift $c$ such that $\mathrm{id}-c>0$,
+\begin{equation}
+T_j(\xv)=c_j+\exp\!\Bigl(\log\mathcal{Q}_1\!\bigl[e^{\log(\mathrm{id}_j-c_j)+g}\bigr](\xv)-\log\mathcal{Q}_1\!\bigl[e^{g}\bigr](\xv)\Bigr)-(\boldsymbol{\beta}_{\mathrm{bias}})_j ,
+\end{equation}
+which is well defined uniformly in $\gamma$.
+
+\subsection{Baseline transport maps (current implementation, $\bt\equiv0$)}
+\label{sec:baseline}
+The pipeline in its present form uses the driftless bridge, so
+$\mathcal{Q}_1=\mathcal{Q}_1^{\dagger}=\mathcal{P}_1$ is the pure heat semigroup and
+\eqref{eq:baryT} specialises to a \emph{pair} of barycentric maps: the forward map
+$T$ (conditional mean of the target position given the source, built from $g$) and
+the backward map $S$ (conditional mean of the source given the target, built from
+$f$),
+\begin{equation}
+\label{eq:TSheat}
+T(\xv)=\frac{\mathcal{P}_1[\,\mathrm{id}\,e^{g}\,](\xv)}{\mathcal{P}_1[e^{g}](\xv)}-\boldsymbol{\beta}_{\mathrm{bias}}(\xv),
+\qquad
+S(\xv)=\frac{\mathcal{P}_1[\,\mathrm{id}\,e^{f}\,](\xv)}{\mathcal{P}_1[e^{f}](\xv)}-\boldsymbol{\beta}_{\mathrm{bias}}(\xv),
+\end{equation}
+sharing the single Neumann identity-leak correction
+$\boldsymbol{\beta}_{\mathrm{bias}}=\mathcal{P}_1[\mathrm{id}]/\mathcal{P}_1[1]-\mathrm{id}$.
+Each of the five distinct heat solves in \eqref{eq:TSheat} is evaluated through the
+stable log-domain operator $\log\mathcal{P}_1[e^{(\cdot)}]$, with the positivity
+shift $\mathrm{id}\mapsto\mathrm{id}-c$ ($c=\min_\xv\mathrm{id}-1$) applied
+componentwise so that $\log(\mathrm{id}-c)$ is finite; this is exactly the form
+\eqref{eq:baryT} with $\mathcal{Q}_1$ replaced by $\mathcal{P}_1$. Both maps reduce
+to the identity far from the transported feature (where $\boldsymbol{\beta}_{\mathrm{bias}}$
+cancels the leak) and to the entropic Monge map on its support.
+
+\subsection{Convex displacement interpolation of the Mach field}
+\label{sec:cdi}
+The maps $T,S$ act on the shock-feature marginals; the physical field is recovered
+by a gradient-free \emph{convex displacement interpolation} (CDI). For $t\in(0,1)$,
+\begin{equation}
+\label{eq:cdi}
+\widehat M(t,\xv)=(1-t)\,M_0\!\bigl((1-t)\,\xv+t\,S(\xv)\bigr)
+                 +t\,M_1\!\bigl(t\,\xv+(1-t)\,T(\xv)\bigr),
+\end{equation}
+where $M_0,M_1$ are the endpoint Mach fields, sampled at the displaced pre-images by
+linear interpolation on the mesh (nearest-neighbour fallback inside the solid body).
+The construction is exact at the endpoints, $\widehat M(0,\cdot)=M_0$ and
+$\widehat M(1,\cdot)=M_1$, and needs no map inversion: the forward pre-image
+$t\,\xv+(1-t)\,T(\xv)$ pulls back $M_1$, the backward pre-image
+$(1-t)\,\xv+t\,S(\xv)$ pulls back $M_0$, and the two are blended with the convex
+weights $(1-t,t)$. This is the object the analytic drift of
+Section~\ref{sec:diamond} is designed to improve: by pre-transporting the shocks,
+$\bt$ leaves $T,S$ close to the identity and keeps \eqref{eq:cdi} well-conditioned
+at small $\gamma$.
+
+% =====================================================================
+\section{Analytic reference drift for a diamond airfoil}
+\label{sec:diamond}
+
+The endpoints $\mu,\nu$ are the shock-feature marginals of the Mach fields at
+freestream Mach numbers $M_0$ and $M_1$. We construct $\bt_t$ so that it
+transports the shock structure between the two conditions; the bridge of
+Section~\ref{sec:drift} supplies the remaining correction.
+
+\subsection{Geometry}
+The diamond is a symmetric rhombus of chord $c$, half-chord $h_c=c/2$, total
+height $H=c\tan\alpha$, half-height $h_t=H/2$, centred at $(c_x,c_y)$, with
+vertices
+\[
+\underbrace{(c_x-h_c,c_y)}_{\text{LE}},\
+\underbrace{(c_x,c_y+h_t)}_{\text{upper shoulder}},\
+\underbrace{(c_x+h_c,c_y)}_{\text{TE}},\
+\underbrace{(c_x,c_y-h_t)}_{\text{lower shoulder}} .
+\]
+From the vertices, independent of $M$,
+\begin{equation}
+\av_{\mathrm{LE}}=(c_x-h_c,c_y),\quad
+\av_{\mathrm{TE}}=(c_x+h_c,c_y),\quad
+\theta_{\mathrm{LE}}=\theta_{\mathrm{TE}}=\arctan\!\frac{h_t}{h_c}=\alpha,
+\end{equation}
+and the shoulder produces an expansion through the angle $\Delta\theta_{\mathrm{sh}}=2\alpha$.
+
+\subsection{Oblique-shock wave angles}
+For an attached oblique shock produced by deflection $\theta$ at Mach $M$ in a gas
+of ratio of specific heats $\gamma_g$, the wave angle $\beta_s$ solves the $\theta$--$\beta$--$M$ relation
+\begin{equation}
+\label{eq:tbm}
+\tan\theta=2\,\cot\beta_s\,\frac{M^2\sin^2\beta_s-1}{M^2(\gamma_g+\cos2\beta_s)+2};
+\end{equation}
+denote by $\beta_s(\theta,M)$ its weak-shock root (the smaller root, exceeding
+the Mach angle $\arcsin(1/M)$).
+
+\begin{assumption}
+\label{ass:attached}
+$\alpha<\theta_{\max}(M):=\max_{\beta_s}\theta(\beta_s,M)$ for all
+$M\in[M_0,M_1]$, so both shock families are attached, and each shock is modelled
+as a straight ray from its edge.
+\end{assumption}
+
+\paragraph{Leading-edge family.} The LE shock deflects the freestream by
+$\theta_{\mathrm{LE}}=\alpha$ at the freestream Mach $M$:
+\begin{equation}
+\beta_s^{\mathrm{LE}}(M)=\beta_s(\alpha,M).
+\end{equation}
+
+\paragraph{Trailing-edge family.} The TE shock processes the flow that has
+crossed the LE shock and expanded around the shoulder. With
+$\beta=\beta_s^{\mathrm{LE}}(M)$ and $M_{n1}=M\sin\beta$, the Mach behind the LE
+shock is
+\begin{equation}
+M_{n2}^2=\frac{1+\tfrac{\gamma_g-1}{2}M_{n1}^2}{\gamma_g M_{n1}^2-\tfrac{\gamma_g-1}{2}},
+\qquad
+M_a=\frac{M_{n2}}{\sin(\beta-\alpha)} .
+\end{equation}
+The Prandtl--Meyer function
+\begin{equation}
+\nu(M)=\sqrt{\tfrac{\gamma_g+1}{\gamma_g-1}}\,\arctan\!\sqrt{\tfrac{\gamma_g-1}{\gamma_g+1}(M^2-1)}-\arctan\!\sqrt{M^2-1}
+\end{equation}
+gives the post-shoulder Mach $M_b$ through $\nu(M_b)=\nu(M_a)+2\alpha$, and the TE
+wave angle follows with deflection $\theta_{\mathrm{TE}}=\alpha$ at Mach $M_b$:
+\begin{equation}
+\beta_s^{\mathrm{TE}}(M)=\beta_s(\alpha,M_b(M)).
+\end{equation}
+Both wave angles are evaluated at every interpolation node $M_i=M(t_i)$ rather
+than interpolated between the endpoints.
+
+\subsection{The drift field}
+Fix the schedule $M(t)=(1-t)M_0+tM_1$ and set
+$\beta_s^{\kappa}(t):=\beta_s^{\kappa}(M(t))$ for $\kappa\in\{\mathrm{LE},\mathrm{TE}\}$.
+Define the ray-angle magnitudes
+\begin{equation}
+\psi_{\mathrm{LE}}(t)=\beta_s^{\mathrm{LE}}(t),\qquad
+\psi_{\mathrm{TE}}(t)=\beta_s^{\mathrm{TE}}(t)-\alpha,
+\end{equation}
+the subtraction accounting for the local upstream flow along the rear face; the
+lower ray angle is the negative of the upper, so the two surfaces are mirror
+images. The unit ray directions and angular rates are, for $\sigma\in\{+1,-1\}$,
+\begin{equation}
+\dhat_{\kappa,\sigma}(t)=\bigl(\cos(\sigma\psi_\kappa),\ \sin(\sigma\psi_\kappa)\bigr),
+\qquad
+\omega_\kappa(t)=\dot\psi_\kappa(t)=\frac{d\beta_s^{\kappa}}{dM}\Big|_{M(t)}(M_1-M_0).
+\end{equation}
+Since $\beta_s$ decreases with $M$, $\omega_\kappa<0$: each shock rotates toward
+the body. A point at $\xv$, riding on ray $(\kappa,\sigma)$ as it rotates about
+$\av_\kappa$, has velocity $\sigma\,\omega_\kappa\,\R\,(\xv-\av_\kappa)$, using
+$\R(\cos\varphi,\sin\varphi)=(-\sin\varphi,\cos\varphi)$. Localizing to the shock
+by a Gaussian band of width $\sigma_w$ in the perpendicular distance, gated
+downstream, define
+\begin{equation}
+s_{\kappa,\sigma}=(\xv-\av_\kappa)\cdot\dhat_{\kappa,\sigma},\quad
+\mathrm{dist}_{\kappa,\sigma}=\bigl\|(\xv-\av_\kappa)-s_{\kappa,\sigma}\dhat_{\kappa,\sigma}\bigr\|,\quad
+w_{\kappa,\sigma}=e^{-\mathrm{dist}_{\kappa,\sigma}^2/\sigma_w^2}\,\mathbf{1}[s_{\kappa,\sigma}>0].
+\end{equation}
+The reference drift is
+\begin{equation}
+\boxed{\;
+\bt(t,\xv)=\sum_{\kappa\in\{\mathrm{LE},\mathrm{TE}\}}\ \sum_{\sigma\in\{+1,-1\}}
+\sigma\,\omega_\kappa(t)\,w_{\kappa,\sigma}(t,\xv)\,\R\,(\xv-\av_\kappa).
+\;}
+\end{equation}
+It vanishes in the freestream and, near each shock ray, rotates that shock about
+its edge from the $M_0$ angle toward the $M_1$ angle. Because the localization
+renders $\dive\bt\neq0$, the field enters the bridge through the conservative
+operator $\mathcal{Q}^{\dagger}$ of \eqref{eq:ipfpdrift}, retaining the reaction
+term of Proposition~\ref{prop:forward}.
+
+\end{document}

@@ -1,407 +1,384 @@
+"""
+resolution.py  —  Schrödinger Bridge solvers (1-D + 2-D)
+"""
+import numpy as np
 import jax
 import jax.numpy as jnp
 from jax.scipy.special import logsumexp
-import jax.experimental.sparse as sparse
-from jax.scipy.sparse.linalg import cg
+from functools import partial
+from . import heat_solver
+from . import advdiff_solver
 
-# ---------------------------------------------------------------------------
-#  Ornstein-Uhlenbeck reference process
-# ---------------------------------------------------------------------------
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  OU reference
+# ─────────────────────────────────────────────────────────────────────────────
 
 def ou_transition_density(x_target, x_source, t, theta, sigma, mean):
-    """
-    Gaussian transition density of an OU process:
-        dX_t = -θ (X_t - m) dt + σ dW_t
-
-    Returns p(x_target | x_source, t).
-    """
     theta    = jnp.maximum(theta, 1e-12)
-    variance = sigma**2 * (1.0 - jnp.exp(-2.0 * theta * t)) / (2.0 * theta)
+    variance = sigma**2*(1.0-jnp.exp(-2.0*theta*t))/(2.0*theta)
     variance = jnp.maximum(variance, 1e-14)
-    mean_t   = mean + (x_source - mean) * jnp.exp(-theta * t)
-    log_k    = (-0.5 * (x_target - mean_t)**2 / variance
-                - 0.5 * jnp.log(2.0 * jnp.pi * variance))
+    mean_t   = mean + (x_source-mean)*jnp.exp(-theta*t)
+    log_k    = (-0.5*(x_target-mean_t)**2/variance
+                - 0.5*jnp.log(2.0*jnp.pi*variance))
     return jnp.exp(log_k)
 
-
 def propagate_ou_density(initial_density, x_grid, t, theta, sigma, mean, dx):
-    """
-    Propagate an initial probability density ρ₀ through the OU semigroup:
-        ρ_t(x) = ∫ p(x | y, t) ρ₀(y) dy   (discretised with the trapezoid rule)
-
-    The result is renormalised to preserve unit mass.
-    """
-    t       = jnp.maximum(t, 1e-7)          # safety floor
-    x_col   = x_grid[:, None]               # (N, 1)
-    y_row   = x_grid[None, :]               # (1, N)
-    kernel  = ou_transition_density(x_col, y_row, t, theta, sigma, mean)
-    propagated = kernel @ (initial_density * dx)
-    return propagated / jnp.sum(propagated * dx)
-
+    t      = jnp.maximum(t, 1e-7)
+    kernel = ou_transition_density(x_grid[:,None], x_grid[None,:], t, theta, sigma, mean)
+    prop   = kernel @ (initial_density * dx)
+    return prop / jnp.sum(prop * dx)
 
 def compare_with_ou(rho_solution, initial_density, x_grid, t, theta, sigma, mean, dx):
-    """Return the OU reference density at time t and the L² error against it."""
-    rho_ou  = propagate_ou_density(initial_density, x_grid, t, theta, sigma, mean, dx)
-    l2_err  = jnp.sqrt(jnp.sum((rho_solution - rho_ou)**2 * dx))
-    return rho_ou, l2_err
+    rho_ou = propagate_ou_density(initial_density, x_grid, t, theta, sigma, mean, dx)
+    return rho_ou, jnp.sqrt(jnp.sum((rho_solution-rho_ou)**2*dx))
 
 
-# ---------------------------------------------------------------------------
-#  1D heat semigroup  (Neumann / zero-flux BCs via method of images)
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+#  1-D heat semigroup
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _neumann_log_kernel(x, t, gamma, x_min, interval_length, num_images=5):
-    """
-    Log of the Neumann-BC heat kernel on [x_min, x_min + interval_length],
-    constructed via the method of images.
+    x_col = x[:,None,None]; y_row = x[None,:,None]
+    offsets = (2.0*interval_length)*jnp.arange(-num_images, num_images+1, dtype=x.dtype)
+    direct    = x_col - (y_row + offsets[None,None,:])
+    reflected = x_col + y_row - 2.0*x_min + offsets[None,None,:]
+    log_d = -direct**2/(4.0*gamma*t) - 0.5*jnp.log(4.0*jnp.pi*gamma*t)
+    log_r = -reflected**2/(4.0*gamma*t) - 0.5*jnp.log(4.0*jnp.pi*gamma*t)
+    return logsumexp(jnp.logaddexp(log_d, log_r), axis=-1)
 
-    Shape: (N, N)  — log K(x_i | x_j, t)
-    """
-    x_col  = x[:, None, None]                                     # (N, 1, 1)
-    y_row  = x[None, :, None]                                     # (1, N, 1)
-    offsets = (2.0 * interval_length) * jnp.arange(
-        -num_images, num_images + 1, dtype=x.dtype)               # (2M+1,)
-
-    direct_dist    =  x_col - (y_row + offsets[None, None, :])
-    reflected_dist =  x_col + y_row - 2.0 * x_min + offsets[None, None, :]
-
-    log_direct    = -direct_dist**2    / (4.0 * gamma * t) - 0.5 * jnp.log(4.0 * jnp.pi * gamma * t)
-    log_reflected = -reflected_dist**2 / (4.0 * gamma * t) - 0.5 * jnp.log(4.0 * jnp.pi * gamma * t)
-
-    log_image_kernel = jnp.logaddexp(log_direct, log_reflected)
-    return logsumexp(log_image_kernel, axis=-1)                    # (N, N)
-
-
-def _enforce_zero_flux(values):
-    """Enforce Neumann (zero-flux) boundary conditions by repeating edge values."""
-    values = values.at[0].set(values[1])
-    values = values.at[-1].set(values[-2])
-    return values
-
+def _enforce_zero_flux(v):
+    return v.at[0].set(v[1]).at[-1].set(v[-2])
 
 def apply_logPt_exp(h, x, t, gamma, dx):
-    """
-    Apply the 1D heat semigroup P_t to a log-potential h in log-space,
-    Uses Neumann (zero-flux) boundary conditions via the method of images.
-    The kernel rows are normalised so that ∫ K(x|y,t) dy = 1 exactly on
-    the discrete grid, preventing mass leakage.
-    """
-    t              = jnp.maximum(t, 1e-7)
-    x_min          = x[0]
-    interval_length = x[-1] - x_min
-
-    log_kernel = _neumann_log_kernel(x, t, gamma, x_min, interval_length)
-
-    # Trapezoid weights to make ∫ K(·|y,t) dy ≈ 1 exactly on the grid
-    weights     = jnp.ones_like(x).at[0].set(0.5).at[-1].set(0.5)
-    log_weights = jnp.log(weights)
-
-    # Row-normalise the kernel (removes any residual mass discretisation error)
-    row_norm   = logsumexp(log_kernel + log_weights[None, :] + jnp.log(dx), axis=1)
-    log_kernel = log_kernel - row_norm[:, None]
-
-    return logsumexp(log_kernel + h[None, :] + log_weights[None, :] + jnp.log(dx), axis=1)
+    t          = jnp.maximum(t, 1e-7)
+    log_kernel = _neumann_log_kernel(x, t, gamma, x[0], x[-1]-x[0])
+    weights    = jnp.ones_like(x).at[0].set(0.5).at[-1].set(0.5)
+    log_w      = jnp.log(weights)
+    row_norm   = logsumexp(log_kernel+log_w[None,:]+jnp.log(dx), axis=1)
+    log_kernel = log_kernel - row_norm[:,None]
+    return logsumexp(log_kernel+h[None,:]+log_w[None,:]+jnp.log(dx), axis=1)
 
 
-# ---------------------------------------------------------------------------
-#  IPFP  (Iterative Proportional Fitting Procedure / Sinkhorn)
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+#  IPFP 1-D
+# ─────────────────────────────────────────────────────────────────────────────
 
 def apply_IPFP(log_mu0, log_mu1, x, gamma, dx, num_iter=50):
-    """
-    Solve the Schrödinger Bridge via IPFP (continuous Sinkhorn).
-
-    Parameters
-    ----------
-    log_mu0, log_mu1 : arrays of shape (N,)
-        Log of the source and target marginal densities.
-    x                : array of shape (N,)
-        Spatial grid.
-    gamma            : float
-        Diffusion coefficient of the reference Brownian motion.
-    dx               : float
-        Grid spacing.
-    num_iter         : int
-        Number of IPFP iterations (fixed; required for JAX JIT).
-
-    Returns
-    -------
-    f, g : arrays of shape (N,)
-        Converged Schrödinger half-bridge potentials.
-    """
     def body_fn(_, val):
         f_k, g_k = val
-        g_next = log_mu1 - apply_logPt_exp(f_k, x, 1.0, gamma, dx)
-        g_next = _enforce_zero_flux(g_next)
-        f_next = log_mu0 - apply_logPt_exp(g_next, x, 1.0, gamma, dx)
-        f_next = _enforce_zero_flux(f_next)
-        return f_next, g_next
-
-    f_init = jnp.zeros_like(x)
-    g_init = jnp.zeros_like(x)
-    f_final, g_final = jax.lax.fori_loop(0, num_iter, body_fn, (f_init, g_init))
-    f_final = _enforce_zero_flux(f_final)
-    g_final = _enforce_zero_flux(g_final)
-    return f_final, g_final
+        g_n = _enforce_zero_flux(log_mu1 - apply_logPt_exp(f_k, x, 1.0, gamma, dx))
+        f_n = _enforce_zero_flux(log_mu0 - apply_logPt_exp(g_n, x, 1.0, gamma, dx))
+        return f_n, g_n
+    f, g = jax.lax.fori_loop(0, num_iter, body_fn,
+                              (jnp.zeros_like(x), jnp.zeros_like(x)))
+    return _enforce_zero_flux(f), _enforce_zero_flux(g)
 
 
-def apply_IPFP_debug(log_mu0, log_mu1, x, gamma, dx, num_iter=50, tol=1e-6):
+# ─────────────────────────────────────────────────────────────────────────────
+#  Bridge density / drift (1-D)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def retrieve_rho(f, g, x, t, gamma, dx):
+    rho = jnp.exp(apply_logPt_exp(f, x, t, gamma, dx)
+                + apply_logPt_exp(g, x, 1.0-t, gamma, dx))
+    return rho / jnp.maximum(jnp.sum(rho*dx), 1e-14)
+
+def retrieve_b(g, x, t, gamma, dx):
+    g_t = apply_logPt_exp(g, x, 1.0-t, gamma, dx)
+    dg  = jnp.gradient(g_t, dx).at[0].set(0.0).at[-1].set(0.0)
+    return 2.0*gamma*dg
+
+def compute_drift_field(g, x, t_array, gamma, dx):
+    return jnp.array([retrieve_b(g, x, jnp.maximum(t, 1e-4), gamma, dx)
+                      for t in t_array])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  2-D FVM heat semigroup
+# ─────────────────────────────────────────────────────────────────────────────
+
+@partial(jax.jit, static_argnames=["n_steps"])
+def apply_logPt_fvm(h, t, gamma, mesh, n_steps):
+    t         = jnp.maximum(t, 1e-12)
+    M_shift   = jnp.max(h)
+    phi_safe  = jnp.exp(h - M_shift)
+    # Floor at 1e-300 (a normal float64, FTZ-safe) rather than 1e-30: the floor
+    # sets where the log-potential tail is truncated — log(1e-30)≈-69 vs
+    # log(1e-300)≈-690.  At small γ the faint mass that must bridge *around* the
+    # body has kernel weight exp(-d²/4γ); the 1e-30 floor clamps it to zero once
+    # d²/4γ>69 (decoupling the two sides), while 1e-300 carries it to d²/4γ<690,
+    # lowering the connectivity floor by ~10× in γ.  Only affects clamped cells.
+    phi_final = jnp.maximum(
+        heat_solver.solve_heat_equation(phi_safe, t, gamma, mesh, n_steps), 1e-300)
+    return jnp.log(phi_final) + M_shift
+
+@partial(jax.jit, static_argnames=["n_steps"])
+def retrieve_rho_2d(f, g, t, gamma, mesh, n_steps):
+    f_t = apply_logPt_fvm(f, t,       gamma, mesh, n_steps)
+    g_t = apply_logPt_fvm(g, 1.0-t,   gamma, mesh, n_steps)
+    rho = jnp.exp(f_t + g_t)
+    return rho / jnp.maximum(jnp.sum(rho*mesh.area), 1e-14)
+
+@partial(jax.jit, static_argnames=["n_steps"])
+def retrieve_b_2d(g, t, gamma, mesh, n_steps):
+    """b_t(x) = 2γ ∇g_t(x),  g_t = log P_{1-t} e^g."""
+    g_t    = apply_logPt_fvm(g, 1.0-t, gamma, mesh, n_steps)
+    grad_g = heat_solver.compute_scalar_gradient_LSQ(g_t, mesh)
+    return 2.0*gamma*grad_g
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  2-D FVM advection–diffusion semigroups  Q  and  Q†  (log domain)
+#
+#  Drifted generalisation of apply_logPt_fvm.  Q propagates the backward wave
+#  function η* (non-conservative β·∇+γΔ); Q† propagates the forward η
+#  (conservative −div(βu)+γΔ).  Both reduce to apply_logPt_fvm when β≡0.
+#  See referrence_drift.tex eq. (ipfpdrift):
+#      f = log μ − log Q₁[e^g],     g = log ν − log Q†₁[e^f].
+# ─────────────────────────────────────────────────────────────────────────────
+
+@partial(jax.jit, static_argnames=["n_steps"])
+def apply_logQt_fvm(h, t, gamma, mesh, beta_cells, n_steps):
+    """log Q_t[e^h] — non-conservative backward semigroup (β·∇ + γΔ)."""
+    t         = jnp.maximum(t, 1e-12)
+    M_shift   = jnp.max(h)
+    phi_safe  = jnp.exp(h - M_shift)
+    phi_final = jnp.maximum(
+        advdiff_solver.solve_advdiff_equation(
+            phi_safe, t, gamma, mesh, beta_cells, n_steps), 1e-300)
+    return jnp.log(phi_final) + M_shift
+
+
+@partial(jax.jit, static_argnames=["n_steps"])
+def apply_logQt_adjoint_fvm(h, t, gamma, mesh, beta_cells, n_steps):
+    """log Q†_t[e^h] — conservative forward semigroup (−div(βu) + γΔ)."""
+    t         = jnp.maximum(t, 1e-12)
+    M_shift   = jnp.max(h)
+    phi_safe  = jnp.exp(h - M_shift)
+    phi_final = jnp.maximum(
+        advdiff_solver.solve_advdiff_equation_adjoint(
+            phi_safe, t, gamma, mesh, beta_cells, n_steps), 1e-300)
+    return jnp.log(phi_final) + M_shift
+
+
+@partial(jax.jit, static_argnames=["n_steps"])
+def retrieve_b_2d_drift(g, t, gamma, mesh, beta_cells, n_steps):
+    """Total optimal drift  b_t = β + 2γ ∇g_t,  g_t = log Q_{1-t}[e^g]  (drifted
+    case).  β is the reference drift; 2γ∇log η* is the entropic correction."""
+    g_t    = apply_logQt_fvm(g, 1.0 - t, gamma, mesh, beta_cells, n_steps)
+    grad_g = heat_solver.compute_scalar_gradient_LSQ(g_t, mesh)
+    return beta_cells + 2.0 * gamma * grad_g
+
+
+@partial(jax.jit, static_argnames=["n_steps"])
+def retrieve_rho_2d_drift(f, g, t, gamma, mesh, beta_cells, n_steps):
     """
-    Python-loop version of IPFP for debugging and convergence monitoring.
-    Not JIT-compatible, but prints the residual at each iteration.
-
-    Returns
-    -------
-    f, g        : converged potentials
-    residuals   : list of float — ‖f_{k+1} − f_k‖ at each iteration
+    ρ_t = Q_t[e^f]·Q†_{1-t}... — the drifted marginal.  The forward wave function
+    η_t is propagated by Q† from t=0, the backward η*_t by Q from t=1, so
+    ρ_t = exp( log Q†_t[e^f] + log Q_{1-t}[e^g] ), normalised to unit mass.
     """
-    f = jnp.zeros_like(x)
-    g = jnp.zeros_like(x)
-    residuals = []
-    for i in range(num_iter):
-        g_new = log_mu1 - apply_logPt_exp(f, x, 1.0, gamma, dx)
-        g_new = _enforce_zero_flux(g_new)
-        f_new = log_mu0 - apply_logPt_exp(g_new, x, 1.0, gamma, dx)
-        f_new = _enforce_zero_flux(f_new)
-        res = float(jnp.max(jnp.abs(f_new - f)))
+    f_t = apply_logQt_adjoint_fvm(f, t,       gamma, mesh, beta_cells, n_steps)
+    g_t = apply_logQt_fvm(        g, 1.0 - t, gamma, mesh, beta_cells, n_steps)
+    rho = jnp.exp(f_t + g_t)
+    return rho / jnp.maximum(jnp.sum(rho * mesh.area), 1e-14)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  IPFP 2-D — JIT  (use after calibrating num_iter with the debug/Anderson run)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@partial(jax.jit, static_argnames=["num_iter","n_steps"])
+def apply_IPFP_2d(log_mu0, log_mu1, gamma, mesh, num_iter=50, n_steps=100):
+    def body_fn(_, val):
+        f_k, g_k = val
+        g_n = log_mu1 - apply_logPt_fvm(f_k, 1.0, gamma, mesh, n_steps)
+        f_n = log_mu0 - apply_logPt_fvm(g_n, 1.0, gamma, mesh, n_steps)
+        return f_n, g_n
+    N = mesh.tris.shape[0]
+    return jax.lax.fori_loop(0, num_iter, body_fn,
+                              (jnp.zeros(N), jnp.zeros(N)))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  IPFP 2-D — Anderson(m) acceleration  ← USE THIS FOR PRODUCTION MACH RUNS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def apply_IPFP_2d_anderson(log_mu0, log_mu1, gamma, mesh, n_steps,
+                            num_iter=4000, tol=1e-5, m=5, print_every=50,
+                            f_init=None, g_init=None):
+    """
+    Anderson(m)-accelerated IPFP.  3-7× fewer iterations than plain Sinkhorn.
+
+    Each step costs the same as one plain Sinkhorn step (one forward + one
+    backward heat solve), plus a negligible O(m²N) CPU least-squares solve.
+
+    Convergence note
+    ────────────────
+    For gamma=0.002 on the bump mesh the plain Sinkhorn rate is
+    ρ ≈ 0.9973/iter.  Reaching tol=1e-4 from cold start requires ~2150 plain
+    iterations.  Anderson(5) typically converges in 400-700 iterations.
+
+    Parameters
+    ──────────
+    m      : Anderson memory window (5 is usually optimal, up to 10 for noisy problems)
+    tol    : convergence threshold on max‖Δf‖ (1e-4 is sufficient for CDI)
+    f_init : warm-start for f (e.g. result from previous annealing stage)
+    g_init : warm-start for g
+    """
+    N = mesh.tris.shape[0]
+    f = jnp.zeros(N) if f_init is None else jnp.asarray(f_init)
+    g = jnp.zeros(N) if g_init is None else jnp.asarray(g_init)
+
+    X_hist: list = []   # concatenated (f,g) proposals,  each shape (2N,)
+    R_hist: list = []   # corresponding residuals,        each shape (2N,)
+    residuals    = []
+
+    for k in range(num_iter):
+        g_new = log_mu1 - apply_logPt_fvm(f, 1.0, gamma, mesh, n_steps)
+        f_new = log_mu0 - apply_logPt_fvm(g_new, 1.0, gamma, mesh, n_steps)
+
+        rf  = np.asarray(f_new - f)
+        rg  = np.asarray(g_new - g)
+        res = float(np.max(np.abs(rf)))
         residuals.append(res)
-        f, g = f_new, g_new
+
+        if (k+1) % print_every == 0:
+            eta = ""
+            if len(residuals) >= 2*print_every and res > tol:
+                window = 2*print_every
+                rho_est = (res / residuals[-window]) ** (1.0/window)
+                if 0.0 < rho_est < 1.0:
+                    n_left  = int(np.ceil(np.log(tol/res) / np.log(rho_est)))
+                    eta = f"  ρ={rho_est:.4f}  ETA ~{n_left} more iters"
+            print(f"  Anderson IPFP  iter {k+1:5d}  res={res:.3e}{eta}")
+
         if res < tol:
-            print(f"  IPFP converged at iteration {i+1}  (residual = {res:.2e})")
+            f, g = f_new, g_new
+            print(f"  Converged at iter {k+1}  (res={res:.2e})")
             break
+
+        X_hist.append(np.concatenate([np.asarray(f_new), np.asarray(g_new)]))
+        R_hist.append(np.concatenate([rf, rg]))
+        if len(X_hist) > m:
+            X_hist.pop(0); R_hist.pop(0)
+
+        mk = len(X_hist)
+        if mk < 2:
+            f, g = f_new, g_new
+            continue
+
+        R   = np.stack(R_hist, axis=1)
+        X   = np.stack(X_hist, axis=1)
+        RtR = R.T @ R
+        lam = max(1e-12*float(np.trace(RtR)), 1e-30)
+        try:
+            c = np.linalg.solve(RtR + lam*np.eye(mk), np.ones(mk))
+            c = c / c.sum()
+        except np.linalg.LinAlgError:
+            f, g = f_new, g_new
+            continue
+
+        x_aa = X @ c
+        f    = jnp.array(x_aa[:N])
+        g    = jnp.array(x_aa[N:])
+
     return f, g, residuals
 
 
-# ---------------------------------------------------------------------------
-#  Bridge density and drift field  (1D)
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+#  Drifted IPFP 2-D — Anderson(m) acceleration with a reference drift β
+#
+#  Same structure as apply_IPFP_2d_anderson but with the two half-steps of
+#  referrence_drift.tex eq. (ipfpdrift):
+#      f = log μ − log Q₁ [e^g]      (Q  = non-conservative backward semigroup)
+#      g = log ν − log Q†₁[e^f]      (Q† = conservative   forward  semigroup)
+#  When beta_cells ≡ 0 both operators equal the heat semigroup and this reduces
+#  to apply_IPFP_2d_anderson exactly.
+# ─────────────────────────────────────────────────────────────────────────────
 
-def retrieve_rho(f, g, x, t, gamma, dx):
-    """
-    Compute the Schrödinger Bridge density at time t ∈ [0, 1]:
+def apply_IPFP_2d_anderson_drift(log_mu0, log_mu1, gamma, mesh, beta_cells, n_steps,
+                                 num_iter=4000, tol=1e-5, m=5, print_every=50,
+                                 f_init=None, g_init=None):
+    """Anderson(m)-accelerated drifted IPFP.  See module header and the heat
+    version apply_IPFP_2d_anderson for the acceleration details."""
+    N = mesh.tris.shape[0]
+    f = jnp.zeros(N) if f_init is None else jnp.asarray(f_init)
+    g = jnp.zeros(N) if g_init is None else jnp.asarray(g_init)
 
-        ρ_t(x) = (P_t e^f)(x) · (P_{1−t} e^g)(x)
+    X_hist: list = []
+    R_hist: list = []
+    residuals    = []
 
-    The result is renormalised to ensure ∫ ρ_t dx = 1 (numerical safeguard).
+    for k in range(num_iter):
+        # eq. (ipfpdrift): f uses Q (non-conservative), g uses Q† (conservative)
+        f_new = log_mu0 - apply_logQt_fvm(g, 1.0, gamma, mesh, beta_cells, n_steps)
+        g_new = log_mu1 - apply_logQt_adjoint_fvm(f_new, 1.0, gamma, mesh, beta_cells, n_steps)
 
-    Parameters
-    ----------
-    f, g : arrays of shape (N,)  — converged IPFP potentials
-    x    : spatial grid  (N,)
-    t    : float in [0, 1]
-    gamma: diffusion coefficient
-    dx   : grid spacing
-    """
-    f_t = apply_logPt_exp(f, x,       t,       gamma, dx)
-    g_t = apply_logPt_exp(g, x, 1.0 - t,       gamma, dx)
-    rho = jnp.exp(f_t + g_t)
-    # Renormalise for numerical safety (theoretically exact at convergence)
-    mass = jnp.sum(rho * dx)
-    return rho / jnp.maximum(mass, 1e-14)
+        rf  = np.asarray(f_new - f)
+        rg  = np.asarray(g_new - g)
+        res = float(np.max(np.abs(rf)))
+        residuals.append(res)
 
+        if (k+1) % print_every == 0:
+            eta = ""
+            if len(residuals) >= 2*print_every and res > tol:
+                window = 2*print_every
+                rho_est = (res / residuals[-window]) ** (1.0/window)
+                if 0.0 < rho_est < 1.0:
+                    n_left  = int(np.ceil(np.log(tol/res) / np.log(rho_est)))
+                    eta = f"  ρ={rho_est:.4f}  ETA ~{n_left} more iters"
+            print(f"  Drifted IPFP  iter {k+1:5d}  res={res:.3e}{eta}")
 
-def retrieve_b(g, x, t, gamma, dx):
-    """
-    Compute the optimal drift field of the Schrödinger Bridge at time t:
+        if res < tol:
+            f, g = f_new, g_new
+            print(f"  Converged at iter {k+1}  (res={res:.2e})")
+            break
 
-        b_t(x) = 2γ ∇ g_t(x)    where  g_t = P_{1−t} g
+        X_hist.append(np.concatenate([np.asarray(f_new), np.asarray(g_new)]))
+        R_hist.append(np.concatenate([rf, rg]))
+        if len(X_hist) > m:
+            X_hist.pop(0); R_hist.pop(0)
 
-    Zero-flux boundary conditions are enforced at the domain edges.
-    """
-    g_t       = apply_logPt_exp(g, x, 1.0 - t, gamma, dx)
-    nabla_g_t = jnp.gradient(g_t, dx)
-    nabla_g_t = nabla_g_t.at[0].set(0.0).at[-1].set(0.0)
-    return 2.0 * gamma * nabla_g_t
+        mk = len(X_hist)
+        if mk < 2:
+            f, g = f_new, g_new
+            continue
 
+        R   = np.stack(R_hist, axis=1)
+        X   = np.stack(X_hist, axis=1)
+        RtR = R.T @ R
+        lam = max(1e-12*float(np.trace(RtR)), 1e-30)
+        try:
+            c = np.linalg.solve(RtR + lam*np.eye(mk), np.ones(mk))
+            c = c / c.sum()
+        except np.linalg.LinAlgError:
+            f, g = f_new, g_new
+            continue
 
-def compute_drift_field(g, x, t_array, gamma, dx):
-    """
-    Compute the drift mapping b_t(x) for all times in t_array.
+        x_aa = X @ c
+        f    = jnp.array(x_aa[:N])
+        g    = jnp.array(x_aa[N:])
 
-    Returns an array of shape (len(t_array), N).
-    """
-    b_matrix = []
-    for t in t_array:
-        t_safe = jnp.maximum(t, 1e-4)       # avoid singular gradient at t = 0
-        b_matrix.append(retrieve_b(g, x, t_safe, gamma, dx))
-    return jnp.array(b_matrix)
-
-
-# ---------------------------------------------------------------------------
-#  2D heat semigroup  (cell-centred FVM, implicit Euler)
-# ---------------------------------------------------------------------------
-
-def build_cell_centered_laplacian(mesh):
-    """
-    Build the sparse flux-weight matrix W and the inverse-area vector A_inv
-    for a cell-centred Finite Volume discretisation of the Laplacian:
-
-        (∇² u)_i ≈ (A_inv)_i · (W u)_i
-
-    Neumann (zero-flux) boundary conditions are enforced by zeroing fluxes
-    across faces that have no valid neighbour (neighbour index = −1).
-
-    Parameters
-    ----------
-    mesh : Mesh
-        Triangular mesh object (see mesh.py).
-
-    Returns
-    -------
-    W_sparse : jax sparse BCOO matrix  (N_tris × N_tris)
-    A_inv    : array of shape (N_tris,)  — reciprocal cell areas
-    """
-    N_tris  = mesh.tris.shape[0]
-    A_inv   = 1.0 / mesh.area
-
-    neighbors   = mesh.neighbors        # (N_tris, 3)   — −1 for boundary faces
-    valid_mask  = neighbors >= 0
-    safe_neighbors = jnp.where(valid_mask, neighbors, 0)
-
-    # Distance between cell barycenters
-    centers_i = mesh.barycenter[:, None, :]       # (N_tris, 1, 2)
-    centers_j = mesh.barycenter[safe_neighbors]   # (N_tris, 3, 2)
-    d_ij      = jnp.linalg.norm(centers_i - centers_j, axis=-1)  # (N_tris, 3)
-
-    # Shared face lengths
-    l_ij = mesh.surface[mesh.face_connectivity]   # (N_tris, 3)
-
-    # Off-diagonal fluxes  (zero at boundary faces)
-    off_diag_fluxes = jnp.where(valid_mask, l_ij / d_ij, 0.0)
-
-    # --- Build BCOO sparse matrix ---
-    row_indices = jnp.repeat(jnp.arange(N_tris), 3)
-    col_indices = neighbors.flatten()
-    data        = off_diag_fluxes.flatten()
-
-    valid_sparse_mask = col_indices >= 0
-    row_indices = row_indices[valid_sparse_mask]
-    col_indices = col_indices[valid_sparse_mask]
-    data        = data[valid_sparse_mask]
-
-    # Diagonal: −∑ off-diagonal fluxes  (conservation of mass)
-    diag_data    = -jnp.sum(off_diag_fluxes, axis=1)
-    diag_indices = jnp.arange(N_tris)
-
-    final_rows = jnp.concatenate([row_indices, diag_indices])
-    final_cols = jnp.concatenate([col_indices, diag_indices])
-    final_data = jnp.concatenate([data, diag_data])
-
-    indices  = jnp.stack([final_rows, final_cols], axis=1)
-    W_sparse = sparse.BCOO((final_data, indices), shape=(N_tris, N_tris))
-
-    return W_sparse, A_inv
+    return f, g, residuals
 
 
-def apply_logPt_implicit(h, t, gamma, W_sparse, A_inv):
-    """
-    Apply the 2D heat semigroup P_t to a log-potential h in log-space,
-    using an implicit Euler (backward Euler) time-step on the cell-centred mesh.
+# ─────────────────────────────────────────────────────────────────────────────
+#  IPFP 2-D — plain Python loop (convergence monitoring)
+# ─────────────────────────────────────────────────────────────────────────────
 
-    Solves the linear system:
-        (I − γ t A_inv W) v = e^{h − max(h)}
-
-    then returns  log(v) + max(h)  to avoid overflow.
-
-    Parameters
-    ----------
-    h        : array (N_tris,)  — log-potential
-    t        : float            — propagation time
-    gamma    : float            — diffusion coefficient
-    W_sparse : BCOO sparse (N_tris × N_tris)
-    A_inv    : array (N_tris,)  — reciprocal cell areas
-    """
-    t = jnp.maximum(t, 1e-12)
-
-    # Global shift to prevent exp() overflow
-    M_shift = jnp.max(h)
-    u_safe  = jnp.exp(h - M_shift)
-
-    def implicit_operator(v):
-        flux        = W_sparse @ v
-        scaled_flux = A_inv * flux
-        return v - (gamma * t) * scaled_flux
-
-    v, _ = cg(implicit_operator, u_safe, tol=1e-6)
-    v    = jnp.maximum(v, 1e-30)
-    return jnp.log(v) + M_shift
-
-
-def retrieve_rho_2d(f, g, t, gamma, W_sparse, A_inv):
-    """
-    Compute the 2D Schrödinger Bridge density at time t ∈ [0, 1]:
-
-        ρ_t = (P_t e^f) · (P_{1−t} e^g)
-
-    Renormalised so that ∑_i ρ_i · area_i = 1.
-    """
-    f_t = apply_logPt_implicit(f, t,       gamma, W_sparse, A_inv)
-    g_t = apply_logPt_implicit(g, 1.0 - t, gamma, W_sparse, A_inv)
-    rho = jnp.exp(f_t + g_t)
-    # Normalise using cell areas (A_inv is 1/area)
-    mass = jnp.sum(rho / A_inv)
-    return rho / jnp.maximum(mass, 1e-14)
-
-
-def retrieve_b_2d(g, t, gamma, mesh, W_sparse, A_inv):
-    """
-    Compute the 2D optimal drift field:
-        b_t(x) = 2γ ∇ g_t(x)
-
-    The gradient is reconstructed cell-by-cell via Gauss's divergence theorem:
-        ∇ g_i ≈ (1 / |T_i|) ∑_{faces j} g_face_j  n_j  |e_j|
-
-    Neumann BCs are enforced: at boundary faces, g_face = g_center → ∇g · n = 0.
-
-    Returns an array of shape (N_tris, 2).
-    """
-    N_tris = mesh.tris.shape[0]
-    g_t    = apply_logPt_implicit(g, 1.0 - t, gamma, W_sparse, A_inv)
-
-    neighbors    = mesh.neighbors
-    valid_mask   = neighbors >= 0
-    cell_indices = jnp.arange(N_tris)[:, None]
-    # Neumann trick: substitute own cell index at boundary → zero normal gradient
-    safe_neighbors = jnp.where(valid_mask, neighbors, cell_indices)
-
-    g_t_center = g_t[:, None]                           # (N_tris, 1)
-    g_t_neigh  = g_t[safe_neighbors]                    # (N_tris, 3)
-    g_face     = 0.5 * (g_t_center + g_t_neigh)         # (N_tris, 3)
-
-    face_lengths  = mesh.surface[mesh.face_connectivity] # (N_tris, 3)
-    normals       = mesh.normals                         # (N_tris, 3, 2)
-
-    # Gauss reconstruction: ∑_j g_j n_j |e_j|
-    flux_vectors = g_face[..., None] * normals * face_lengths[..., None]
-    grad_g       = jnp.sum(flux_vectors, axis=1) / mesh.area[:, None]
-
-    return 2.0 * gamma * grad_g
-
-
-def apply_IPFP_2d(log_mu0, log_mu1, gamma, W_sparse, A_inv, num_iter=50):
-    """
-    Solve the 2D Schrödinger Bridge via IPFP on a triangular mesh.
-
-    Parameters
-    ----------
-    log_mu0, log_mu1 : arrays of shape (N_tris,)
-    gamma            : diffusion coefficient
-    W_sparse         : sparse Laplacian flux matrix
-    A_inv            : inverse cell-area array
-    num_iter         : number of Sinkhorn iterations
-
-    Returns
-    -------
-    f, g : converged Schrödinger potentials of shape (N_tris,)
-    """
-    def body_fn(_, val):
-        f_k, g_k = val
-        g_next = log_mu1 - apply_logPt_implicit(f_k, 1.0, gamma, W_sparse, A_inv)
-        f_next = log_mu0 - apply_logPt_implicit(g_next, 1.0, gamma, W_sparse, A_inv)
-        return f_next, g_next
-
-    N_tris  = A_inv.shape[0]
-    f_init  = jnp.zeros(N_tris)
-    g_init  = jnp.zeros(N_tris)
-    f_final, g_final = jax.lax.fori_loop(0, num_iter, body_fn, (f_init, g_init))
-    return f_final, g_final
+def apply_IPFP_2d_debug(log_mu0, log_mu1, gamma, mesh, n_steps,
+                         num_iter=500, tol=1e-5, print_every=50):
+    N = mesh.tris.shape[0]
+    f = g = jnp.zeros(N)
+    rs = []
+    for i in range(num_iter):
+        g_new = log_mu1 - apply_logPt_fvm(f, 1.0, gamma, mesh, n_steps)
+        f_new = log_mu0 - apply_logPt_fvm(g_new, 1.0, gamma, mesh, n_steps)
+        res   = float(jnp.max(jnp.abs(f_new - f)))
+        rs.append(res); f, g = f_new, g_new
+        if (i+1) % print_every == 0:
+            print(f"  IPFP 2D  iter {i+1:5d}  residual = {res:.3e}")
+        if res < tol:
+            print(f"  Converged at iter {i+1}"); break
+    return f, g, rs

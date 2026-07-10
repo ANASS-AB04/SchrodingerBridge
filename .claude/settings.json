@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(JAX_ENABLE_X64=true uv run python -c ' *)",
+      "Bash(pdflatex -interaction=nonstopmode SB.tex)",
+      "Bash(pdflatex -interaction=nonstopmode SB/SB.tex)",
+      "Bash(pdflatex -interaction=nonstopmode -halt-on-error referrence_drift.tex)",
+      "Bash(echo \"exit=$?\")",
+      "Read(//tmp/**)"
+    ]
+  }
+}

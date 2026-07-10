@@ -122,98 +122,6 @@ def plot_3d_evolution(output, x, t_array, rho_matrix, title="3D Density Evolutio
     print(f"Saved 3D surface: {fname}")
 
 
-def plot_3d_drift_surface(output, x, t_array, b_field, title="3D Drift Evolution"):
-    """
-    3D surface plot of the drift field b_t(x) over space and time.
-    """
-    with plt.rc_context({"text.usetex": False}):
-        fig = plt.figure(figsize=(12, 8))
-        ax = fig.add_subplot(111, projection='3d')
-
-        X, T = np.meshgrid(x, t_array)
-        surf = ax.plot_surface(
-            X, T, b_field,
-            cmap='RdBu_r',
-            edgecolor='none',
-            alpha=0.90,
-        )
-
-        ax.set_xlabel('Space (x)', fontsize=12)
-        ax.set_ylabel('Time (t)', fontsize=12)
-        ax.set_zlabel(r'Drift $b_t(x)$', fontsize=12)
-        ax.set_title(title, fontsize=14)
-        ax.view_init(elev=20, azim=-60)
-        fig.colorbar(surf, ax=ax, shrink=0.5, aspect=10, label=r'Drift $b_t(x)$')
-
-    fname = f"{output}_drift_3d_surface.png"
-    plt.savefig(fname, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"Saved 3D drift surface: {fname}")
-
-
-def integrate_drift_map(x, t_array, b_field):
-    """
-    Integrate the drift field forward in time to obtain a transport map.
-
-    The map returns the position X_t(x_0) of particles initially located at x_0,
-    using first-order explicit Euler integration on the interpolated drift field.
-    """
-    x_array = np.asarray(x)
-    t_array = np.asarray(t_array)
-    b_field = np.asarray(b_field)
-
-    mapped_positions = np.zeros_like(b_field)
-    mapped_positions[0] = x_array
-
-    current_positions = x_array.copy()
-    for idx in range(len(t_array) - 1):
-        dt = t_array[idx + 1] - t_array[idx]
-        drift_now = np.interp(current_positions, x_array, b_field[idx])
-        current_positions = current_positions + dt * drift_now
-        mapped_positions[idx + 1] = current_positions
-
-    return mapped_positions
-
-
-def plot_transport_map(output, x, t_array, transport_map, title="Transport map (integral of drift)"):
-    """
-    Plot the drift-integrated transport map as a 3D surface.
-    """
-    with plt.rc_context({"text.usetex": False}):
-        fig = plt.figure(figsize=(12, 8))
-        ax = fig.add_subplot(111, projection='3d')
-
-        X0, T = np.meshgrid(x, t_array)
-        surf = ax.plot_surface(
-            X0,
-            T,
-            transport_map,
-            cmap='plasma',
-            edgecolor='none',
-            alpha=0.90,
-        )
-
-        ax.plot_surface(
-            X0,
-            T,
-            X0,
-            color='white',
-            alpha=0.15,
-            linewidth=0,
-        )
-
-        ax.set_xlabel('Initial position x₀', fontsize=12)
-        ax.set_ylabel('Time (t)', fontsize=12)
-        ax.set_zlabel('Mapped position X_t(x₀)', fontsize=12)
-        ax.set_title(title, fontsize=14)
-        ax.view_init(elev=20, azim=-60)
-        fig.colorbar(surf, ax=ax, shrink=0.5, aspect=10, label='Mapped position')
-
-    fname = f"{output}_transport_map_3d.png"
-    plt.savefig(fname, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"Saved transport map: {fname}")
-
 def plot_1d_sde_trajectories(output, x, t_array, b_field, mu0, mu1, gamma, num_particles=15, seed=42):
     """
     Trace le schéma 2D des trajectoires SDE (temps vs espace) avec les distributions
@@ -298,82 +206,6 @@ def plot_1d_sde_trajectories(output, x, t_array, b_field, mu0, mu1, gamma, num_p
     plt.savefig(fname, dpi=300, bbox_inches='tight')
     plt.close()
     print(f"Graphique des trajectoires SDE sauvegardé : {fname}")
-# ---------------------------------------------------------------------------
-#  Difference plots  (SB − reference)
-# ---------------------------------------------------------------------------
-
-def plot_differences(output, x, t_array, rho_sb, rho_ref):
-    """
-    Spatial difference  ρ_SB(x, t) − ρ_ref(x, t)  at selected intermediate times.
-    """
-    fig, ax = plt.subplots(figsize=(10, 6))
-    key_times = [0.2, 0.5, 0.8, 1.0]
-
-    for t_val in key_times:
-        idx        = int(np.argmin(np.abs(t_array - t_val)))
-        difference = rho_sb[idx] - rho_ref[idx]
-        ax.plot(x, difference, label=f't = {t_val:.1f}', linewidth=2)
-
-    ax.axhline(0, color='black', linestyle='--', alpha=0.5, linewidth=1.2)
-    ax.set_title("Spatial Mismatch: Schrödinger Bridge vs. Reference", fontsize=14)
-    ax.set_xlabel("Space (x)", fontsize=12)
-    ax.set_ylabel(r"Density difference $(\rho_{SB} - \rho_{ref})$", fontsize=12)
-    ax.legend(loc='best', fontsize=11)
-    ax.grid(True, alpha=0.3)
-
-    fname = f"{output}_differences.png"
-    plt.savefig(fname, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"Saved differences: {fname}")
-
-
-# ---------------------------------------------------------------------------
-#  Convergence diagnostics
-# ---------------------------------------------------------------------------
-
-def plot_ipfp_convergence(output, residuals):
-    """
-    Plot IPFP residuals (‖f_{k+1} − f_k‖_∞) versus iteration number.
-    """
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.semilogy(residuals, linewidth=2, color='steelblue')
-    ax.set_xlabel("Iteration", fontsize=12)
-    ax.set_ylabel(r"Residual $\|f_{k+1} - f_k\|_\infty$", fontsize=12)
-    ax.set_title("IPFP Convergence", fontsize=14)
-    ax.grid(True, which='both', alpha=0.3)
-
-    fname = f"{output}_ipfp_convergence.png"
-    plt.savefig(fname, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"Saved convergence plot: {fname}")
-
-
-def plot_marginal_fit(output, x, mu0, mu1, rho_sb_t0, rho_sb_t1, dx):
-    """
-    Check that the bridge marginals at t=0 and t=1 match μ₀ and μ₁.
-    """
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    titles = ['Source marginal  (t = 0)', 'Target marginal  (t = 1)']
-    refs   = [mu0, mu1]
-    sbs    = [rho_sb_t0, rho_sb_t1]
-
-    for ax, title, ref, sb in zip(axes, titles, refs, sbs):
-        ax.plot(x, ref, 'b-', linewidth=2.5, label='Target marginal μ')
-        ax.plot(x, sb,  'r--', linewidth=2.0, label='Bridge marginal ρ_t')
-        l2 = float(np.sqrt(np.sum((sb - ref)**2 * dx))  )
-        ax.set_title(f"{title}\nL² error = {l2:.2e}", fontsize=12)
-        ax.set_xlabel("Space (x)", fontsize=11)
-        ax.set_ylabel("Density", fontsize=11)
-        ax.legend(fontsize=10)
-        ax.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    fname = f"{output}_marginal_fit.png"
-    plt.savefig(fname, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"Saved marginal fit: {fname}")
-
-
 def _figure_path(output, suffix):
     if output.lower().endswith((".png", ".jpg", ".jpeg", ".pdf")):
         base, _ = os.path.splitext(output)
@@ -573,70 +405,103 @@ def plot_3d_density_surface(mesh, density, output, title="3D density surface"):
     print(f"Saved 3D density surface: {fname}")
 
 
-def plot_3d_density_transport(mesh, rho_matrix, t_array, output, ncols=4, label=r"Density"):
+def plot_abs_error_grid(mesh, err_matrix, t_ref, output, method_name, ncols=3):
     """
-    Visualise transported cell-centred densities as 3D surfaces over time.
+    One figure per method showing |M_interp − M_ref| on the mesh for every
+    reference timestep, laid out like plot_density_transport.
 
-    Parameters
-    ----------
-    mesh : Mesh
-        Triangular mesh object.
-    rho_matrix : array, shape (T, N_tris)
-        Density snapshots on the mesh cells.
-    t_array : array, shape (T,)
-        Times associated with each snapshot.
-    output : str
-        Prefix or image path for the saved figure.
-    ncols : int
-        Number of columns in the subplot grid.
-    label : str
-        Colorbar label.
+    err_matrix : (len(t_ref), N_cells)  absolute error fields
+    t_ref      : 1-D array of reference times (e.g. [0.1, …, 0.9])
+    output     : path prefix  →  saves  <output>_abs_error.png
     """
-    rho_matrix = np.asarray(rho_matrix)
-    t_array = np.asarray(t_array)
+    err_matrix = np.asarray(err_matrix)
+    t_ref      = np.asarray(t_ref)
+    n_times    = err_matrix.shape[0]
+    ncols      = min(max(1, ncols), n_times)
+    nrows      = int(np.ceil(n_times / ncols))
 
-    barycenters = np.asarray(mesh.barycenter)
-    triang = mtri.Triangulation(barycenters[:, 0], barycenters[:, 1])
+    triang = mtri.Triangulation(
+        np.asarray(mesh.points)[:, 0],
+        np.asarray(mesh.points)[:, 1],
+        np.asarray(mesh.tris),
+    )
 
-    n_times = rho_matrix.shape[0]
-    ncols = min(max(1, ncols), n_times)
-    nrows = int(np.ceil(n_times / ncols))
-
-    vmin = float(np.min(rho_matrix))
-    vmax = float(np.max(rho_matrix))
+    vmin = 0.0
+    vmax = float(err_matrix.max())
     norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
 
     with plt.rc_context({"text.usetex": False}):
-        fig = plt.figure(figsize=(4 * ncols, 3.6 * nrows))
-        shared_surf = None
+        fig, axes = plt.subplots(nrows, ncols,
+                                 figsize=(4 * ncols, 3.5 * nrows),
+                                 squeeze=False)
+        im = None
+        for idx, ax in enumerate(axes.flat):
+            if idx >= n_times:
+                ax.axis("off")
+                continue
+            im = ax.tripcolor(triang, err_matrix[idx],
+                              cmap="hot", shading="flat", norm=norm)
+            ax.set_aspect("equal")
+            ax.set_title(f"t = {float(t_ref[idx]):.2f}", fontsize=11)
+            ax.axis("off")
 
-        for idx in range(n_times):
-            ax = fig.add_subplot(nrows, ncols, idx + 1, projection="3d")
-            surf = ax.plot_trisurf(
-                barycenters[:, 0],
-                barycenters[:, 1],
-                rho_matrix[idx],
-                triangles=triang.triangles,
-                cmap="viridis",
-                linewidth=0.0,
-                antialiased=False,
-                norm=norm,
-            )
-            if shared_surf is None:
-                shared_surf = surf
-            ax.set_title(f"t = {float(t_array[idx]):.2f}", fontsize=11)
-            ax.set_xlabel(r"$x$", fontsize=9)
-            ax.set_ylabel(r"$y$", fontsize=9)
-            ax.set_zlabel(label, fontsize=9)
-            ax.view_init(elev=25, azim=-60)
+        if im is not None:
+            fig.colorbar(im, ax=axes.ravel().tolist(),
+                         fraction=0.02, pad=0.02,
+                         label=r"$|M_\mathrm{interp} - M_\mathrm{ref}|$")
+        fig.suptitle(f"|{method_name} − ref|", fontsize=14)
 
-        fig.subplots_adjust(right=0.88)
-        fig.colorbar(shared_surf, ax=fig.axes, fraction=0.025, pad=0.02, label=label)
-
-    fname = _figure_path(output, "_transported_3d.png")
-    plt.savefig(fname, dpi=300, bbox_inches="tight")
+    fname = _figure_path(output, "_abs_error.png")
+    plt.savefig(fname, dpi=200, bbox_inches="tight")
     plt.close(fig)
-    print(f"Saved transported 3D density evolution: {fname}")
+    print(f"Saved abs error grid: {fname}")
+
+
+def plot_l2_linf_errors(output, t_array, errors_dict, title="Validation error vs t",
+                        l2_formula=None, linf_formula=None):
+    """
+    Plot per-time L2 and L∞ errors for one or several methods, side by side.
+
+    Parameters
+    ----------
+    errors_dict : dict {label: {"l2": 1-D array, "linf": 1-D array}}, each
+        array of length len(t_array).
+    l2_formula, linf_formula : str, optional
+        LaTeX strings (without surrounding ``$``) describing exactly how each
+        error is computed; rendered as an annotation on the corresponding
+        subplot. Defaults are the Mach-interpolation definitions (relative L2,
+        absolute L∞).
+    """
+    if l2_formula is None:
+        l2_formula = (r"\|M-M_{\mathrm{ref}}\|_{L^2}/\|M_{\mathrm{ref}}\|_{L^2}"
+                      r"=\sqrt{\sum_i (M_i-M_i^{\mathrm{ref}})^2 A_i}\,/\,"
+                      r"\sqrt{\sum_i (M_i^{\mathrm{ref}})^2 A_i}")
+    if linf_formula is None:
+        linf_formula = r"\|M-M_{\mathrm{ref}}\|_{L^\infty}=\max_i |M_i-M_i^{\mathrm{ref}}|"
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    colors = ["tab:blue", "tab:orange", "tab:green", "tab:red"]
+    for (label, errs), color in zip(errors_dict.items(), colors):
+        axes[0].plot(t_array, errs["l2"],   "o-", label=label, color=color, linewidth=2, markersize=4)
+        axes[1].plot(t_array, errs["linf"], "o-", label=label, color=color, linewidth=2, markersize=4)
+    axes[0].set_title("L2 error vs t", fontsize=13)
+    axes[1].set_title("L∞ error vs t", fontsize=13)
+    for ax, ylabel, formula in zip(axes, ["L2 error", "L∞ error"],
+                                   [l2_formula, linf_formula]):
+        ax.set_xlabel("t", fontsize=12)
+        ax.set_ylabel(ylabel, fontsize=12)
+        ax.legend(fontsize=10)
+        ax.grid(True, alpha=0.3)
+        ax.text(0.5, 0.98, rf"${formula}$", transform=ax.transAxes,
+                ha="center", va="top", fontsize=11,
+                bbox=dict(boxstyle="round", facecolor="white", alpha=0.8, edgecolor="0.7"))
+    fig.suptitle(title, fontsize=14)
+    plt.tight_layout()
+    fname = _figure_path(output, "_l2_linf_errors.png")
+    plt.savefig(fname, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved L2/L∞ error plot: {fname}")
+
 
 def plot_entropy(output, t_array, entropy_array, title="Evolution of Differential Entropy"):
     """

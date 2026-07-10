@@ -11,8 +11,9 @@ dependencies = [
     "matplotlib>=3.9",
     "meshio>=5.3.5",
     "meshpy>=2023.1.1",
-    "jax[cuda]", #à adapter selon le cluster/GPU utilisé
+    "jax[cuda12,cuda13-2]", #à adapter selon le cluster/GPU utilisé
     "scikit-learn>=1.6.1",
+    "marker-pdf>=1.10.2",
 ]
 
 [dependency-groups]
@@ -23,8 +24,11 @@ dev = [
     "mypy>=1.10",
 ]
 
+[project.scripts]
+sb-run = "SB.main:main"
+
 [tool.setuptools]
-packages = ["Euler", "meshes"]
+packages = ["Euler", "SB"]
 
 [tool.uv]
 # Pour créer le venv sur Mac

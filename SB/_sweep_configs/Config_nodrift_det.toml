@@ -1,0 +1,131 @@
+# ---------------------------------------------------------------------------
+# SB execution parameters — this file is the only source of run configuration
+# (SB/main.py takes no command-line arguments).
+# ---------------------------------------------------------------------------
+[run]
+case       = "2d_mach_interpolation"
+output_dir = "outputs"
+
+[run.1d]
+# γ=0.05 gives σ=√(2γ)≈0.316, well-resolved on the 1D grid (dx≈0.03).
+# Lower γ → SB approaches OT; higher γ → SB approaches OU diffusion.
+gamma    = 0.005
+num_iter = 1000
+
+[run.2d]
+gamma    = 0.005
+num_iter = 1000
+
+# ---------------------------------------------------------------------------
+# 2D Mach interpolation — shared parameters
+# ---------------------------------------------------------------------------
+[run.mach]
+
+# Switch between "diamond" and "bump" to change the active test case.
+case       = "diamond"
+
+gamma_sb   = 0.005
+# γ-annealing (ε-scaling): DECREASING list of γ for the IPFP, each stage
+# warm-started from the previous (f,g).  Reaches small γ that diverge cold.
+# Last entry = target γ used downstream.  Empty [] → single gamma_sb above.
+gamma_sb_schedule = []
+
+# Reference drift β(t,x) conditioning the bridge (referrence_drift.tex).
+#   "null"    — β≡0, pure-heat bridge (default; identical to previous behaviour)
+#   "oblique" — analytic θ-β-M diamond drift (windowed rigid shock rotations)
+# When "oblique", the IPFP kernel becomes the advection-diffusion semigroup Q/Q†.
+reference_drift = "null"
+drift_sigma_w   = 0.2        # Gaussian shock-band half-width (localization length)
+drift_gamma_gas = 1.4        # ratio of specific heats for the θ-β-M relation
+drift_cfl_adv   = 0.5        # advective CFL for the Q/Q† FVM solve
+sensor_p   = 2        # exponent in |φ − median(φ)|^p for shock density
+n_frames   = 11
+num_iter   = 1000          # Anderson IPFP iteration cap
+anderson_m = 5              # Anderson acceleration memory window (0 = plain Sinkhorn)
+debug_ipfp = false          # true → run the plain-Sinkhorn calibration tool instead of the pipeline
+ipfp_cfl   = 0.5           # CFL for the FVM heat solve inside IPFP (SSP-RK2 stable up to 1.0)
+
+# Heat-equation smoothing applied to the raw density before IPFP
+# For "mask": smooths the sensor weights.  For all other modes: post-processing.
+smooth_heat  = true         # false → skip smoothing (faster, rawer densities)
+smooth_gamma = 0.1          # diffusion coefficient γ
+smooth_t     = 0.001        # final time t  (σ = √(2γt) ≈ 0.032 for defaults)
+
+# Wasserstein-2 error vs. reference (debiased entropic OT via convolutional Sinkhorn)
+compute_w2  = true          # false → skip W₂, report only L2/L∞ (much faster)
+wass_gamma  = 0.005         # OT regularization γ (σ = √(2γ) ≈ 0.100)
+wass_iter   = 50            # Sinkhorn iterations (50 sufficient for rank-ordering)
+
+# Shock-density (marginal) construction. One of:
+#   "mask"      — legacy Ducros-sensor weighted density, heat-smoothed     → outputs/Mach_interpolation/ducros/
+#   "screened"  — screened-Poisson (ROF) shock-anchored inpainting         → outputs/Mach_interpolation/denoising/screened/
+#   "tv"        — total-variation shock-anchored inpainting                → outputs/Mach_interpolation/denoising/tv/
+#   "iso"       — Gaussian ridges on Mach iso-contour lines (gated by      → outputs/Mach_interpolation/iso/
+#                 Ducros sensor); see iso_n_contours / iso_ducros_pct
+#   "isocurve"  — thin PCA-fitted ridge along the Ducros iso-curve         → outputs/Mach_interpolation/isocurve/
+#   "iso_hessian" — Alauzet–Loseille Hessian metric node density           → outputs/Mach_interpolation/iso/hessian/
+#   "field"     — whole-field marginal (|M-M∞| or ‖∇M‖), see field_source  → outputs/Mach_interpolation/field/
+density_mode    = "iso_hessian"
+density_pct     = 92.0      # percentile for the shock trust ramp / iso-curve threshold
+density_decay   = 0.05      # off-shock decay length ℓ for screened/TV inpainting
+tv_weight       = 1.0       # TV term weight when density_mode = "tv"
+density_target  = "unit"    # "unit" (shock indicator) or "sensor" (keep sensor magnitude)
+
+# density_mode = "iso" only
+iso_n_contours  = 6         # number of equispaced Mach iso-contour lines
+iso_ducros_pct  = 50.0      # only look at contours where Ducros > this percentile
+
+# density_mode = "isocurve" only
+isocurve_order = 1          # 1 = straight shock (diamond), 2 = quadratic (bump)
+isocurve_sigma = 0.0        # ridge half-width; 0 = auto (1.5x median cell size)
+
+# density_mode = "iso_hessian" only  (Alauzet-Loseille metric node density)
+hessian_lp   = 2.0          # L^p exponent; rho proportional (det|H|)^{p/(2p+2)}. inf->shocks only, 1->fans kept
+hessian_mode = "det"
+                            # NOTE: use "eig" for the reference-drift A/B — "det" collapses on the
+                            # straight diamond legs, leaving no mass on the shocks β is meant to move.
+                            # shocks (diamond). 0 = pure determinant (vanishes on straight shocks);
+                            # 0.1–0.3 gives det a transportable marginal. Ignored by "eig".
+
+# density_mode = "field" only
+field_source    = "grad_mach"  # pert_mach |M-M∞|, pert_p, grad_mach ‖∇M‖, grad_p, combo
+field_floor_pct = 50.0         # percentile subtracted to remove the freestream baseline
+
+# ---------------------------------------------------------------------------
+# Case-specific paths
+# ---------------------------------------------------------------------------
+[run.mach.diamond]
+bundle0      = "results/diamond/h0.025/AOA0.00_M2.00_HLLC_MUSCL_SRK2_t4.00.npz"
+bundle1      = "results/diamond/h0.025/AOA0.00_M2.50_HLLC_MUSCL_SRK2_t4.00.npz"
+mesh         = "meshes/diamond/diamond_h0.025.npy"
+mach0_inlet  = 2.0    # freestream Mach for bundle0
+mach1_inlet  = 2.5    # freestream Mach for bundle1
+ref_bundles = [
+    "results/diamond/h0.025/AOA0.00_M2.05_HLLC_MUSCL_SRK2_t4.00.npz",
+    "results/diamond/h0.025/AOA0.00_M2.10_HLLC_MUSCL_SRK2_t4.00.npz",
+    "results/diamond/h0.025/AOA0.00_M2.15_HLLC_MUSCL_SRK2_t4.00.npz",
+    "results/diamond/h0.025/AOA0.00_M2.20_HLLC_MUSCL_SRK2_t4.00.npz",
+    "results/diamond/h0.025/AOA0.00_M2.25_HLLC_MUSCL_SRK2_t4.00.npz",
+    "results/diamond/h0.025/AOA0.00_M2.30_HLLC_MUSCL_SRK2_t4.00.npz",
+    "results/diamond/h0.025/AOA0.00_M2.35_HLLC_MUSCL_SRK2_t2.74.npz",
+    "results/diamond/h0.025/AOA0.00_M2.40_HLLC_MUSCL_SRK2_t4.00.npz",
+    "results/diamond/h0.025/AOA0.00_M2.45_HLLC_MUSCL_SRK2_t4.00.npz",
+]
+
+[run.mach.bump]
+bundle0      = "results/bump/h0.025/M2.00_HLLC_MUSCL_SRK2_t4.00.npz"
+bundle1      = "results/bump/h0.025/M2.50_HLLC_MUSCL_SRK2_t4.00.npz"
+mesh         = "meshes/bump/bump_h0.025.npy"
+mach0_inlet  = 2.0   # freestream Mach for bundle0
+mach1_inlet  = 2.5   # freestream Mach for bundle1
+ref_bundles = [
+    "results/bump/h0.025/M2.05_HLLC_MUSCL_SRK2_t4.00.npz",
+    "results/bump/h0.025/M2.10_HLLC_MUSCL_SRK2_t4.00.npz",
+    "results/bump/h0.025/M2.15_HLLC_MUSCL_SRK2_t4.00.npz",
+    "results/bump/h0.025/M2.20_HLLC_MUSCL_SRK2_t4.00.npz",
+    "results/bump/h0.025/M2.25_HLLC_MUSCL_SRK2_t4.00.npz",
+    "results/bump/h0.025/M2.30_HLLC_MUSCL_SRK2_t4.00.npz",
+    "results/bump/h0.025/M2.35_HLLC_MUSCL_SRK2_t4.00.npz",
+    "results/bump/h0.025/M2.40_HLLC_MUSCL_SRK2_t4.00.npz",
+    "results/bump/h0.025/M2.45_HLLC_MUSCL_SRK2_t4.00.npz",
+]
