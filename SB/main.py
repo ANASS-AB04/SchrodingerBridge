@@ -140,6 +140,7 @@ def main():
                 drift_sigma_w=cmach.get("drift_sigma_w", 0.2),
                 drift_gamma_gas=cmach.get("drift_gamma_gas", 1.4),
                 drift_cfl_adv=cmach.get("drift_cfl_adv", 0.5),
+                drift_ffd_cfg = cmach.get("drift", {}).get("ffd", {})
             )
 
     else:

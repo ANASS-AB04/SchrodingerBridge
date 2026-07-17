@@ -40,6 +40,7 @@ from .plot import (
     plot_bridge_dashboard,
     plot_density_transport,
     plot_drift_field,
+    plot_drift_sequence,
     plot_entropy,
     plot_l2_linf_errors,
     plot_abs_error_grid,
@@ -1271,7 +1272,7 @@ def run_mach_interpolation_case(
         mach0_inlet=None, mach1_inlet=None,
         compute_w2=True, wass_gamma=0.005, wass_iter=50,
         reference_drift="null", drift_sigma_w=0.2,
-        drift_gamma_gas=1.4, drift_cfl_adv=0.5):
+        drift_gamma_gas=1.4, drift_cfl_adv=0.5,drift_ffd_cfg=None):
     os.makedirs(output_dir, exist_ok=True)
     print(f"\n{'─'*55}\n  Mach SB-CDI Interpolation\n{'─'*55}")
  
@@ -1373,14 +1374,22 @@ def run_mach_interpolation_case(
     use_drift = reference_drift not in (None, "null", "none", "off")
     beta_ipfp = None
     if use_drift:
-        if mach0_inlet is None or mach1_inlet is None:
-            raise ValueError("reference_drift='oblique' requires mach0_inlet/mach1_inlet")
-        # The IPFP kernel Q₁/Q†₁ is a single unit-time solve → one representative
-        # β field.  Use the midpoint drift β(t=0.5) (ω is ~constant for linear M(t)).
-        beta_np = drift_mod.build_reference_drift(
-            mesh, reference_drift, [0.5],
-            float(mach0_inlet), float(mach1_inlet),
-            gamma_g=drift_gamma_gas, sigma_w=drift_sigma_w)[0]
+        if reference_drift == "ffd":
+            # FFD-registration drift builds its own β directly from the marginals.
+            import ffd_drift
+            beta_np = ffd_drift.build_ffd_beta(
+                mesh, np.asarray(smoothed0), np.asarray(smoothed1),
+                cfg=drift_ffd_cfg, cache_dir=output_dir,
+                tag=f"M{mach0_inlet}_M{mach1_inlet}")
+        else:
+            if mach0_inlet is None or mach1_inlet is None:
+                raise ValueError("reference_drift='oblique' requires mach0_inlet/mach1_inlet")
+            # The IPFP kernel Q₁/Q†₁ is a single unit-time solve → one representative
+            # β field.  Use the midpoint drift β(t=0.5) (ω is ~constant for linear M(t)).
+            beta_np = drift_mod.build_reference_drift(
+                mesh, reference_drift, [0.5],
+                float(mach0_inlet), float(mach1_inlet),
+                gamma_g=drift_gamma_gas, sigma_w=drift_sigma_w)[0]
         beta_ipfp = jnp.asarray(beta_np)
         beta_max  = float(np.max(np.linalg.norm(beta_np, axis=1)))
         # #1 risk check: the operative number is the face Péclet
@@ -1603,6 +1612,12 @@ def run_mach_interpolation_case(
                            os.path.join(output_dir, "SB_Mach_density"))
     plot_drift_field(mesh, drift_seq, t_array,
                      os.path.join(output_dir, "SB_Mach_drift"), time_index=5)
+    # Per-timestep drift grid for the drifted bridges (oblique / ffd).  The null
+    # (pure-heat) bridge has no reference drift, so only its single-frame field
+    # above is kept.
+    if use_drift:
+        plot_drift_sequence(mesh, drift_seq, t_array,
+                            os.path.join(output_dir, "SB_Mach_drift"))
     plot_entropy(os.path.join(output_dir, "SB_Mach_entropy"), t_array, entropies,
                  title="Entropy along SB")
 

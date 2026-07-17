@@ -25,6 +25,7 @@ VARIANTS=(
   "nodrift_eig|null|eig|0.005"
   "drift_det|oblique|det|0.0001"
   "drift_eig|oblique|eig|0.0001"
+  "drift_eig|ffd|eig|0.003"
 )
 
 for v in "${VARIANTS[@]}"; do

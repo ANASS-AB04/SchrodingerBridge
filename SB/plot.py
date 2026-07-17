@@ -358,6 +358,67 @@ def plot_drift_field(mesh, drift_matrix, t_array, output, time_index=0, scale=30
     print(f"Saved drift field: {fname}")
 
 
+def plot_drift_sequence(mesh, drift_matrix, t_array, output, ncols=4, scale=30,
+                        label=r"$|\mathbf{b}_t|$"):
+    """
+    Grid of the 2D drift field b_t at EVERY interpolation time in t_array
+    (magnitude tripcolor + sampled quiver per panel, shared colour scale).
+
+    Companion to plot_drift_field (which shows a single time).  Used for the
+    drifted bridges (oblique / ffd) to show how the optimal drift b_t = β + 2γ∇g_t
+    evolves across the interpolation.
+
+    drift_matrix : array, shape (T, N_tris, 2)
+    """
+    drift_matrix = np.asarray(drift_matrix)
+    t_array = np.asarray(t_array)
+
+    barycenters = np.asarray(mesh.barycenter)
+    triang = mtri.Triangulation(
+        np.asarray(mesh.points)[:, 0],
+        np.asarray(mesh.points)[:, 1],
+        np.asarray(mesh.tris),
+    )
+    mags = np.linalg.norm(drift_matrix, axis=2)          # (T, N)
+
+    n_times = drift_matrix.shape[0]
+    ncols = min(max(1, ncols), n_times)
+    nrows = int(np.ceil(n_times / ncols))
+    step = max(1, int(np.sqrt(len(barycenters)) / 8))    # quiver subsampling
+
+    with plt.rc_context({"text.usetex": False}):
+        fig, axes = plt.subplots(nrows, ncols,
+                                 figsize=(4 * ncols, 3.8 * nrows), squeeze=False)
+        norm = mcolors.Normalize(vmin=float(mags.min()), vmax=float(mags.max()))
+
+        handle = None
+        for idx, ax in enumerate(axes.flat):
+            if idx >= n_times:
+                ax.axis("off")
+                continue
+            b_t = drift_matrix[idx]
+            handle = ax.tripcolor(triang, mags[idx], cmap="RdBu_r",
+                                  shading="flat", norm=norm)
+            ax.quiver(barycenters[::step, 0], barycenters[::step, 1],
+                      b_t[::step, 0], b_t[::step, 1],
+                      color="black", scale=scale, width=0.002, headwidth=4)
+            ax.set_aspect("equal")
+            ax.set_title(f"t = {float(t_array[idx]):.2f}", fontsize=12)
+            ax.set_xlabel(r"$x$", fontsize=10)
+            ax.set_ylabel(r"$y$", fontsize=10)
+
+        if handle is not None:
+            fig.colorbar(handle, ax=axes.ravel().tolist(),
+                         fraction=0.025, pad=0.02, label=label)
+        fig.suptitle(r"SB drift field $b_t$ over interpolation time", fontsize=15)
+        fig.subplots_adjust(right=0.9)
+
+    fname = _figure_path(output, "_drift_sequence.png")
+    plt.savefig(fname, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved drift sequence: {fname}")
+
+
 def plot_3d_density_surface(mesh, density, output, title="3D density surface"):
     """
     Visualise a cell-centred density as a 3D surface over the mesh barycentres.

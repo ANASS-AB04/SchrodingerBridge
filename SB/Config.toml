@@ -38,8 +38,10 @@ gamma_sb_schedule = [0.02, 0.01, 0.005]
 # Reference drift β(t,x) conditioning the bridge (referrence_drift.tex).
 #   "null"    — β≡0, pure-heat bridge (default; identical to previous behaviour)
 #   "oblique" — analytic θ-β-M diamond drift (windowed rigid shock rotations)
+#   "ffd" 
 # When "oblique", the IPFP kernel becomes the advection-diffusion semigroup Q/Q†.
-reference_drift = "null"
+reference_drift = "ffd"
+
 drift_sigma_w   = 0.2        # Gaussian shock-band half-width (localization length)
 drift_gamma_gas = 1.4        # ratio of specific heats for the θ-β-M relation
 drift_cfl_adv   = 0.5        # advective CFL for the Q/Q† FVM solve
@@ -49,6 +51,7 @@ num_iter   = 1000          # Anderson IPFP iteration cap
 anderson_m = 5              # Anderson acceleration memory window (0 = plain Sinkhorn)
 debug_ipfp = false          # true → run the plain-Sinkhorn calibration tool instead of the pipeline
 ipfp_cfl   = 0.5           # CFL for the FVM heat solve inside IPFP (SSP-RK2 stable up to 1.0)
+
 
 # Heat-equation smoothing applied to the raw density before IPFP
 # For "mask": smooths the sensor weights.  For all other modes: post-processing.
@@ -95,6 +98,19 @@ hessian_mode = "eig"        # "det" = (det|H|) node density; "eig" = |lambda_max
 # density_mode = "field" only
 field_source    = "grad_mach"  # pert_mach |M-M∞|, pert_p, grad_mach ‖∇M‖, grad_p, combo
 field_floor_pct = 50.0         # percentile subtracted to remove the freestream baseline
+[drift.ffd]
+grid_n = 144
+n_cp = [10, 10]                  # Bernstein lattice (degree = n_cp − 1)
+alpha_algn = 1.0
+alpha_bij = 0.1
+alpha_jac = 1.0
+alpha_cp_norm = 1e-2
+alpha_w2 = 0.1                   # global capture term — your W2 moment cost
+barrier_epsilon = 0.1
+barrier_fn = "logarithmic"
+smooth_extra_cells = 2.0
+n_iters = 800
+lr = 1e-2
 
 # ---------------------------------------------------------------------------
 # Case-specific paths

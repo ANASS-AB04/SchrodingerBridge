@@ -3,7 +3,9 @@ name = "GenerativePDE"
 version = "0.1.0"
 description = "Generative PDE solvers and neural operators using JAX"
 readme = "README.md"
-requires-python = ">=3.11,<3.12"
+# 3.12 (was 3.11): the phdtruel FFD framework used by reference_drift="ffd"
+# uses typing.override + a PEP 695 `type` alias, both 3.12-only.
+requires-python = ">=3.12,<3.13"
 
 dependencies = [
     "numpy>=1.26,<2.0",
@@ -11,9 +13,23 @@ dependencies = [
     "matplotlib>=3.9",
     "meshio>=5.3.5",
     "meshpy>=2023.1.1",
-    "jax[cuda12,cuda13-2]", #à adapter selon le cluster/GPU utilisé
+    # cuda12 pip wheels bundle their own CUDA+cuDNN and run on the 13.2 driver
+    # (forward-compat).  Do NOT also load a system CUDA toolkit module: its older
+    # libcudnn shadows these wheels → "undefined symbol: cudnnGetLibConfig".
+    "jax[cuda12]", #à adapter selon le cluster/GPU utilisé
     "scikit-learn>=1.6.1",
-    "marker-pdf>=1.10.2",
+    # phdtruel FFD-registration drift (reference_drift="ffd").  phdtruel is not a
+    # declared package with its own metadata, so its runtime deps must be listed
+    # here or the cluster's `uv run` won't install them (they resolve as orphans).
+    "chex",
+    "optax",
+    "jaxtyping",
+    "interpax",
+    "pycpd",
+    "pot",
+    "hickle",
+    "h5py",
+    "pyyaml",
 ]
 
 [dependency-groups]
@@ -22,6 +38,14 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.6",
     "mypy>=1.10",
+]
+# marker-pdf is NOT imported by SB/ or Euler/.  It pulls surya-ocr → torch →
+# nvidia-cudnn-cu13, which collides with jax's nvidia-cudnn-cu12 at import
+# ("undefined symbol: cudnnGetLibConfig").  Kept out of the default install so
+# the cluster GPU run has a single, consistent CUDA-12 stack.  Install on demand
+# with `uv sync --group docs` (or `uv run --group docs …`) when you need it.
+docs = [
+    "marker-pdf>=1.10.2",
 ]
 
 [project.scripts]
