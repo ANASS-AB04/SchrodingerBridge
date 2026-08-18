@@ -8,6 +8,7 @@ if __name__ == "__main__" and __package__ is None:
         sys.path.insert(0, _repo_root)
     __package__ = "SB"
 
+import re
 import tomllib
 
 from .utils import run_1d_case, run_2d_case, run_mach_interpolation_case
@@ -31,10 +32,31 @@ _MACH_MODE_FOLDER = {
 
 def _load_config() -> dict:
     with open(_CFG_PATH, "rb") as fh:
-        return tomllib.load(fh)
+        cfg = tomllib.load(fh)
+    # The FFD drift block is read as cmach["drift"]["ffd"], i.e. it must be
+    # declared as [run.mach.drift.ffd].  A top-level [drift.ffd] parses fine but
+    # never reaches build_ffd_beta, which then silently uses DEFAULT_CFG — so any
+    # grid_n / n_cp tuning would be a no-op.  Fail loudly instead.
+    if "drift" in cfg:
+        raise SystemExit(
+            f"ERROR: {_CFG_PATH} declares a top-level [drift] section; it is never read.\n"
+            f"       Rename [drift.ffd] → [run.mach.drift.ffd].")
+    return cfg
 
 
-def _mach_output_dir(base_output_dir: str, cmach: dict) -> str:
+def _mesh_h_tag(mesh_path: str) -> str:
+    """'meshes/diamond/diamond_h0.0125.npy' → 'h0.0125'.
+
+    The mesh resolution is a first-class axis of the output tree: without it two
+    runs that differ only by mesh land in the same directory and overwrite each
+    other's metrics.json and figures.
+    """
+    stem = os.path.splitext(os.path.basename(mesh_path or ""))[0]
+    m = re.search(r"_(h[0-9.]+)$", stem)
+    return m.group(1) if m else (stem or "hunknown")
+
+
+def _mach_output_dir(base_output_dir: str, cmach: dict, case_cfg: dict) -> str:
     case = cmach.get("case", "diamond")          # diamond | bump
     mode = cmach.get("density_mode", "mask")
     if mode in ("screened", "tv"):
@@ -52,14 +74,16 @@ def _mach_output_dir(base_output_dir: str, cmach: dict) -> str:
     else:
         raise ValueError(f"unknown density_mode {mode!r}")
 
-    # Keep each run's outputs separate: split by drift kind and tag the smallest
-    # annealing γ used (so a new run never overwrites a previous one).
+    # Keep each run's outputs separate: split by mesh resolution, then by drift
+    # kind, then tag the smallest annealing γ used (so a new run never
+    # overwrites a previous one).
+    htag     = _mesh_h_tag(case_cfg.get("mesh", ""))
     drift    = cmach.get("reference_drift", "null") or "null"
     schedule = cmach.get("gamma_sb_schedule") or [cmach.get("gamma_sb", 0.002)]
     gamma_min = min(schedule)
     gtag = f"gmin{gamma_min:g}"
     return os.path.join(base_output_dir, "Mach_interpolation", case, sub,
-                        f"drift_{drift}", gtag)
+                        htag, f"drift_{drift}", gtag)
 
 
 def main():
@@ -97,7 +121,7 @@ def main():
         cmach     = run.get("mach", {})
         mach_case = cmach.get("case", "diamond")
         case_cfg  = cmach.get(mach_case, {})
-        output_dir = _mach_output_dir(base_output_dir, cmach)
+        output_dir = _mach_output_dir(base_output_dir, cmach, case_cfg)
 
         if cmach.get("debug_ipfp", False):
             _run_debug_ipfp(cmach, case_cfg, output_dir)
@@ -131,6 +155,7 @@ def main():
                 smooth_gamma=cmach.get("smooth_gamma", 0.1),
                 smooth_t=cmach.get("smooth_t", 0.005),
                 ipfp_cfl=cmach.get("ipfp_cfl", 0.8),
+                ipfp_tol=cmach.get("ipfp_tol", 1e-7),
                 mach0_inlet=case_cfg.get("mach0_inlet"),
                 mach1_inlet=case_cfg.get("mach1_inlet"),
                 compute_w2=cmach.get("compute_w2", True),

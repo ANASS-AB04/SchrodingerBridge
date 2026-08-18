@@ -444,13 +444,18 @@ def _feature_density(mach_field):
     return np.maximum(np.abs(m - float(np.median(m))), 0.0)
 
 
-def compute_interpolation_error(t_array, mach_bcdi, mach_lin,
+def compute_interpolation_error(t_array, methods_in,
                                 ref_bundle_paths, mesh, output_dir,
                                 wass_gamma=0.005, wass_iter=50,
                                 compute_w2=True):
     """
     Compare interpolated Mach fields against high-resolution solver solutions
     at t = 0.1, 0.2, ..., 0.9 (ref_bundle_paths must be 9 paths in that order).
+
+    ``methods_in`` is an ordered dict {name: mach_sequence}, e.g.
+        {"BaryCDI": …, "Linear": …, "FFD": …}
+    where "FFD" is the raw FFD registration used directly as an interpolator —
+    the control that separates the registration's contribution from the SB's.
 
     Saves one |error| grid image per method plus a combined L2/L∞ vs t plot.
     Prints an L∞ summary table.
@@ -459,7 +464,7 @@ def compute_interpolation_error(t_array, mach_bcdi, mach_lin,
     area   = np.asarray(mesh.area)
     area_j = jnp.asarray(area)
     t_ref = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
-    methods = [("BaryCDI", mach_bcdi), ("Linear", mach_lin)]
+    methods = list(methods_in.items())
     errors   = {name: {"l2": [], "linf": [], "w2": []} for name, _ in methods}
     abs_errs = {name: [] for name, _ in methods}
     n_steps_w = heat_solver.compute_n_steps(mesh, wass_gamma, CFL=0.5)
@@ -468,11 +473,9 @@ def compute_interpolation_error(t_array, mach_bcdi, mach_lin,
               f"σ_w={np.sqrt(2*wass_gamma):.3f}, {n_steps_w} heat steps, "
               f"{wass_iter} Sinkhorn iters, debiased)")
 
+    hdr = f"  │  {'t':>4s}" + "".join(f"  {n + ' L∞':>12s}" for n, _ in methods)
     if compute_w2:
-        hdr = (f"  │  {'t':>4s}  {'BaryCDI L∞':>12s}  {'Linear L∞':>12s}"
-               f"  {'BaryCDI W₂':>12s}  {'Linear W₂':>12s}")
-    else:
-        hdr = f"  │  {'t':>4s}  {'BaryCDI L∞':>12s}  {'Linear L∞':>12s}"
+        hdr += "".join(f"  {n + ' W₂':>12s}" for n, _ in methods)
     print("  ┌─ Interpolation error vs. high-resolution reference ─────────────────────────────────────")
     print(hdr)
 
@@ -556,7 +559,127 @@ def compute_interpolation_error(t_array, mach_bcdi, mach_lin,
     return errors
 
 
- 
+# ─────────────────────────────────────────────────────────────────────────────
+#  Aerodynamic coefficients  (scalar transport-quality metric)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compute_aero_coefficients(t_array, methods_p, ref_bundle_paths, mesh,
+                              output_dir, gamma_gas=1.4, p_inf=1.0):
+    """C_D/C_L of each reconstructed pressure field vs. the reference bundles.
+
+    Why bother when we already have L2/L∞/W₂?  Those measure how wrong a field is
+    everywhere; C_D measures whether the *wall* pressure is right.  For a diamond
+    in supersonic flow the inviscid coefficient IS the wave drag, so it is exactly
+    the quantity the shock placement has to get right — a method can win on L2
+    while misplacing the shock feet on the wedge surface, and only C_D shows it.
+
+    ``methods_p`` is an ordered dict {name: pressure_sequence} matching the shape
+    ``compute_interpolation_error`` takes for Mach.
+
+    Each reference bundle carries its own freestream Mach, so q∞ = ½γp∞M² is read
+    per reference and applied identically to the reference and to every method —
+    the normalisation therefore cancels in the deltas and cannot flatter a method.
+
+    Note on C_L: at AoA=0 the diamond is symmetric, so the reference C_L ≈ 0.  Read
+    a method's |C_L| as the asymmetry its transport hallucinated, not as a score.
+
+    Returns {"t_ref", "mach_ref", "C_D_ref", "C_L_ref",
+             "methods": {name: {"C_D", "C_L", "dC_D", "dC_L"}}}.
+    """
+    from Euler.jax_fvm.src import helper as _helper
+
+    L_ref = float(_mesh_metadata_get(mesh, "obstacle_length", 1.0))
+    t_ref = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
+    methods = list(methods_p.items())
+    out = {name: {"C_D": [], "C_L": [], "dC_D": [], "dC_L": []} for name, _ in methods}
+    cd_ref_all, cl_ref_all, mach_ref_all = [], [], []
+
+    tol_frame = 0.5 / max(len(t_array) - 1, 1)
+    print("  ┌─ Aerodynamic coefficients vs. reference "
+          f"(inviscid ∮p·n, L_ref={L_ref:g}) ─────────────")
+    print(f"  │  {'t':>4s}  {'M∞':>5s}  {'C_D ref':>10s}"
+          + "".join(f"  {n + ' C_D':>11s}  {n + ' ΔC_D':>11s}" for n, _ in methods))
+
+    for t_val, ref_path in zip(t_ref, ref_bundle_paths):
+        idx = int(np.argmin(np.abs(t_array - t_val)))
+        assert abs(t_array[idx] - t_val) <= tol_frame, (
+            f"No frame at t={t_val}: nearest is t={t_array[idx]:.4f}.")
+        data = np.load(ref_path)
+        p_ref = np.asarray(data["primitives"], dtype=float)[:, 3]
+        mach_inf = float(np.asarray(data["mach_in"]).ravel()[0])
+        data.close()
+
+        q_inf = 0.5 * gamma_gas * p_inf * mach_inf ** 2
+        cd_ref, cl_ref = _helper.get_force_coefficients_from_pressure(
+            jnp.asarray(p_ref), mesh, q_inf, L_ref)
+        cd_ref = float(cd_ref);  cl_ref = float(cl_ref)
+        cd_ref_all.append(cd_ref);  cl_ref_all.append(cl_ref)
+        mach_ref_all.append(mach_inf)
+
+        row = f"  │  {t_val:.1f}  {mach_inf:5.2f}  {cd_ref:>10.6f}"
+        for name, p_seq in methods:
+            cd, cl = _helper.get_force_coefficients_from_pressure(
+                jnp.asarray(p_seq[idx]), mesh, q_inf, L_ref)
+            cd = float(cd);  cl = float(cl)
+            out[name]["C_D"].append(cd)
+            out[name]["C_L"].append(cl)
+            out[name]["dC_D"].append(cd - cd_ref)
+            out[name]["dC_L"].append(cl - cl_ref)
+            row += f"  {cd:>11.6f}  {cd - cd_ref:>+11.2e}"
+        print(row)
+
+    print("  └──────────────────────────────────────────────────────────────────────")
+    for name, _ in methods:
+        mean_abs = float(np.mean(np.abs(out[name]["dC_D"])))
+        rel = mean_abs / max(float(np.mean(np.abs(cd_ref_all))), 1e-30)
+        print(f"    {name:>8s}:  mean|ΔC_D| = {mean_abs:.4e}  ({100*rel:.2f} % of C_D)"
+              f"   max|C_L| = {max(abs(v) for v in out[name]['C_L']):.3e}")
+
+    _plot_aero(t_ref, mach_ref_all, cd_ref_all, cl_ref_all, out, output_dir)
+
+    return {"t_ref": [float(t) for t in t_ref],
+            "mach_ref": mach_ref_all,
+            "C_D_ref": cd_ref_all, "C_L_ref": cl_ref_all,
+            "methods": out}
+
+
+def _mesh_metadata_get(mesh, key, default):
+    md = getattr(mesh, "metadata", None) or {}
+    return md.get(key, default)
+
+
+def _plot_aero(t_ref, mach_ref, cd_ref, cl_ref, methods, output_dir):
+    """C_D(t) and C_L(t) per method with the reference overlaid, plus ΔC_D."""
+    import matplotlib.pyplot as plt
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4.5))
+
+    axes[0].plot(t_ref, cd_ref, "ko-", lw=2, label="reference", zorder=5)
+    for name, d in methods.items():
+        axes[0].plot(t_ref, d["C_D"], "s--", alpha=0.85, label=name)
+    axes[0].set_xlabel("t");  axes[0].set_ylabel(r"$C_D$")
+    axes[0].set_title(r"Drag coefficient (wave drag)")
+
+    for name, d in methods.items():
+        axes[1].semilogy(t_ref, np.abs(d["dC_D"]), "s--", alpha=0.85, label=name)
+    axes[1].set_xlabel("t");  axes[1].set_ylabel(r"$|C_D - C_D^{\mathrm{ref}}|$")
+    axes[1].set_title("Drag error")
+
+    axes[2].plot(t_ref, cl_ref, "ko-", lw=2, label="reference", zorder=5)
+    for name, d in methods.items():
+        axes[2].plot(t_ref, d["C_L"], "s--", alpha=0.85, label=name)
+    axes[2].set_xlabel("t");  axes[2].set_ylabel(r"$C_L$")
+    # AoA=0 ⇒ the reference C_L is ~0; this panel reads as a symmetry check.
+    axes[2].set_title(r"Lift coefficient (symmetry check, $C_L^{\mathrm{ref}}\approx 0$)")
+
+    for ax in axes:
+        ax.legend();  ax.grid(True, alpha=0.3)
+    fig.suptitle(f"Aerodynamic coefficients vs. reference "
+                 f"(M∞ {mach_ref[0]:.2f} → {mach_ref[-1]:.2f})")
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "Aero_coefficients.png"),
+                dpi=200, bbox_inches="tight");  plt.close()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Barycentric SB-CDI  (gradient-free, smooth, exact at endpoints)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1160,7 +1283,7 @@ def run_2d_case(test_case, output_dir="outputs", gamma=0.05, num_iter=1000):
     prefix  = os.path.join(output_dir, f"SB_{test_case}_gamma{gamma}")
     mu0, mu1 = get_2d_case(test_case, mesh)
 
-    f, g, _ = apply_IPFP_2d_anderson(jnp.log(mu0), jnp.log(mu1),
+    f, g, _, _ = apply_IPFP_2d_anderson(jnp.log(mu0), jnp.log(mu1),
                           gamma, mesh, num_iter=num_iter, n_steps=n_steps, m=5)
 
     rho_seq   = np.stack([np.asarray(retrieve_rho_2d(f, g, float(t), gamma, mesh, n_steps))
@@ -1268,7 +1391,7 @@ def run_mach_interpolation_case(
         hessian_lp=2.0, hessian_mode="det",
         field_source="pert_mach", field_floor_pct=50.0,
         smooth_heat=True, smooth_gamma=0.1, smooth_t=0.005,
-        ipfp_cfl=0.8,
+        ipfp_cfl=0.8, ipfp_tol=1e-7,
         mach0_inlet=None, mach1_inlet=None,
         compute_w2=True, wass_gamma=0.005, wass_iter=50,
         reference_drift="null", drift_sigma_w=0.2,
@@ -1373,14 +1496,23 @@ def run_mach_interpolation_case(
     # ── [4b] Reference drift β (conditions the bridge; referrence_drift.tex) ───
     use_drift = reference_drift not in (None, "null", "none", "off")
     beta_ipfp = None
+    ffd_maps = None          # (T_ffd, S_ffd) when the FFD registration is available
+    t_ffd_reg = None
     if use_drift:
         if reference_drift == "ffd":
             # FFD-registration drift builds its own β directly from the marginals.
-            import ffd_drift
-            beta_np = ffd_drift.build_ffd_beta(
+            # Relative import (like heat_solver / drift): a bare `import ffd_drift`
+            # only resolves when SB/ happens to be sys.path[0].
+            from . import ffd_drift
+            _t0 = _time.perf_counter()
+            beta_np, ffd_alpha = ffd_drift.build_ffd_beta(
                 mesh, np.asarray(smoothed0), np.asarray(smoothed1),
                 cfg=drift_ffd_cfg, cache_dir=output_dir,
                 tag=f"M{mach0_inlet}_M{mach1_inlet}")
+            t_ffd_reg = _time.perf_counter() - _t0
+            # Raw registration maps, for the FFD-as-interpolator control.
+            _bary_np = np.asarray(mesh.barycenter)
+            ffd_maps = (_bary_np + beta_np, _bary_np + ffd_alpha)
         else:
             if mach0_inlet is None or mach1_inlet is None:
                 raise ValueError("reference_drift='oblique' requires mach0_inlet/mach1_inlet")
@@ -1430,25 +1562,36 @@ def run_mach_interpolation_case(
 
     f = g = None
     ipfp_residuals, stage_bounds = [], []
+    ipfp_residuals_l2 = []
+    ipfp_stages = []                      # per-stage stats → metrics.json
+    IPFP_TOL = float(ipfp_tol)
     t_total0 = _time.perf_counter()
     for k, gk in enumerate(schedule):
         n_steps_k = _n_steps_ipfp(gk)
         t0 = _time.perf_counter()
         if use_drift:
-            f, g, res_k = apply_IPFP_2d_anderson_drift(
+            f, g, res_k, res_l2_k = apply_IPFP_2d_anderson_drift(
                 log_mu0, log_mu1, gk, mesh, beta_ipfp, n_steps=n_steps_k,
-                num_iter=num_iter, tol=1e-7, m=anderson_m, print_every=50,
+                num_iter=num_iter, tol=IPFP_TOL, m=anderson_m, print_every=50,
                 f_init=f, g_init=g)
         else:
-            f, g, res_k = apply_IPFP_2d_anderson(
+            f, g, res_k, res_l2_k = apply_IPFP_2d_anderson(
                 log_mu0, log_mu1, gk, mesh, n_steps=n_steps_k,
-                num_iter=num_iter, tol=1e-7, m=anderson_m, print_every=50,
+                num_iter=num_iter, tol=IPFP_TOL, m=anderson_m, print_every=50,
                 f_init=f, g_init=g)
         f.block_until_ready();  g.block_until_ready()      # GPU is async → sync here
         dt = _time.perf_counter() - t0
         ipfp_residuals.extend(res_k);  stage_bounds.append(len(ipfp_residuals))
+        ipfp_residuals_l2.extend(res_l2_k)
+        ipfp_stages.append(dict(
+            gamma=float(gk), n_steps=int(n_steps_k), iters=int(len(res_k)),
+            final_res=float(res_k[-1]) if res_k else None,
+            final_res_l2=float(res_l2_k[-1]) if res_l2_k else None,
+            converged=bool(res_k and res_k[-1] < IPFP_TOL), time_s=float(dt)))
+        norms = (f"  res∞={res_k[-1]:.2e}  resL2={res_l2_k[-1]:.2e}" if res_k else "")
         print(f"    stage {k+1}/{len(schedule)}  γ={gk:.4g}  n_steps={n_steps_k}  "
-              f"{len(res_k)} iters  {dt:.3f} s  ({1e3*dt/max(len(res_k),1):.1f} ms/iter)")
+              f"{len(res_k)} iters  {dt:.3f} s  "
+              f"({1e3*dt/max(len(res_k),1):.1f} ms/iter){norms}")
     t_total = _time.perf_counter() - t_total0
     gamma_sb = schedule[-1]
     n_steps  = _n_steps_ipfp(gamma_sb)
@@ -1457,12 +1600,16 @@ def run_mach_interpolation_case(
 
     import matplotlib.pyplot as plt
     fig, ax = plt.subplots(figsize=(8, 4))
-    ax.semilogy(ipfp_residuals)
-    ax.axhline(1e-7, color="red", ls="--", label="tol=1e-7")
+    ax.semilogy(ipfp_residuals, label="‖Δf‖∞  (stopping criterion)")
+    # The area-weighted L² residual is mesh-independent where ‖Δf‖∞ is not, so on
+    # a refined mesh the gap between the two curves is the diagnostic: a run that
+    # stalls in ∞ but converges in L² is tripping over a few cells, not unconverged.
+    ax.semilogy(ipfp_residuals_l2, alpha=0.7, label="‖Δf‖_L²(dx)  (mesh-independent)")
+    ax.axhline(IPFP_TOL, color="red", ls="--", label=f"tol={IPFP_TOL:g}")
     for b, gk in zip(stage_bounds[:-1], schedule[:-1]):
         ax.axvline(b, color="grey", ls=":", alpha=0.7)
     ax.set_xlabel("IPFP iteration (concatenated over γ stages)")
-    ax.set_ylabel("residual ‖Δf‖∞")
+    ax.set_ylabel("residual")
     ax.set_title(f"Anderson(m={anderson_m}) γ-annealing {schedule} — "
                  f"{t_total:.2f}s on {dev.platform.upper()}")
     ax.legend();  ax.grid(True, which="both", alpha=0.3)
@@ -1578,29 +1725,88 @@ def run_mach_interpolation_case(
     t_interp0 = _time.perf_counter()
     interp0, interp1, inside_body_cdi, domain_lo_cdi, domain_hi_cdi = \
         build_cdi_interpolators(barycenters, mach0, mach1, barycenter_delaunay, mesh)
-    mach_bcdi = []   # PRIMARY: barycentric SB-CDI (gradient-free, exact endpoints)
-    mach_lin  = []   # baseline: linear
-    for t_val in t_array:
-        print(f"    t = {t_val:.2f} …", end="\r")
-        mach_bcdi.append(reconstruct_mach_barycentric_cdi(
+    t_setup = _time.perf_counter() - t_interp0
+
+    # PRIMARY: barycentric SB-CDI (gradient-free, exact endpoints)
+    _t0 = _time.perf_counter()
+    mach_bcdi = np.stack([
+        reconstruct_mach_barycentric_cdi(
             float(t_val), T_map, S_map, barycenters, mach0, mach1,
-            interp0, interp1, inside_body_cdi, domain_lo_cdi, domain_hi_cdi))
-        mach_lin.append((1.0-t_val)*mach0 + t_val*mach1)
-    mach_bcdi = np.stack(mach_bcdi)
-    mach_lin  = np.stack(mach_lin)
+            interp0, interp1, inside_body_cdi, domain_lo_cdi, domain_hi_cdi)
+        for t_val in t_array])
+    t_recon_sb = _time.perf_counter() - _t0
+
+    # baseline: linear
+    _t0 = _time.perf_counter()
+    mach_lin = np.stack([(1.0-t_val)*mach0 + t_val*mach1 for t_val in t_array])
+    t_recon_lin = _time.perf_counter() - _t0
+
+    # CONTROL: the FFD registration used directly as an interpolator — SAME CDI
+    # formula, but with the raw registration maps (T=x+β, S=x+α) instead of the
+    # SB barycentric maps.  Isolates what the Schrödinger bridge adds on top of
+    # the registration.  γ-independent by construction (like Linear).
+    mach_ffd, t_recon_ffd = None, None
+    if ffd_maps is not None:
+        _t0 = _time.perf_counter()
+        T_ffd, S_ffd = ffd_maps
+        mach_ffd = np.stack([
+            reconstruct_mach_barycentric_cdi(
+                float(t_val), T_ffd, S_ffd, barycenters, mach0, mach1,
+                interp0, interp1, inside_body_cdi, domain_lo_cdi, domain_hi_cdi)
+            for t_val in t_array])
+        t_recon_ffd = _time.perf_counter() - _t0
+
     t_interp = _time.perf_counter() - t_interp0
-    print()
-    print(f"    Interpolation total time: {t_interp:.3f} s  "
-          f"({len(t_array)} frames, {1e3*t_interp/max(len(t_array),1):.1f} ms/frame)")
+    print(f"    Interpolation total time: {t_interp:.3f} s   "
+          f"(setup {t_setup:.2f}s | SB-CDI {t_recon_sb:.2f}s | linear {t_recon_lin:.3f}s"
+          + (f" | FFD {t_recon_ffd:.2f}s" if t_recon_ffd is not None else "") + ")")
+
+    methods_dict = {"BaryCDI": mach_bcdi, "Linear": mach_lin}
+    if mach_ffd is not None:
+        methods_dict["FFD"] = mach_ffd
+
+    # ── Pressure reconstruction (for C_D/C_L) ─────────────────────────────────
+    # The CDI formula is field-agnostic: the transport maps T/S are geometric, so
+    # transporting pressure through the SAME maps costs one extra interpolation
+    # pass and no extra bridge solve.  Pressure is what the force coefficients
+    # need — SB reconstructs fields, never the conservative state W.
+    print("  Reconstructing CDI pressure frames (for C_D/C_L) …")
+    p0 = prims0[:, 3].astype(float)
+    p1 = prims1[:, 3].astype(float)
+    # Reuses barycenter_delaunay — the Qhull triangulation is the expensive part
+    # and it is already built; only the two linear interpolants are new.
+    interp0_p, interp1_p, _, _, _ = \
+        build_cdi_interpolators(barycenters, p0, p1, barycenter_delaunay, mesh)
+
+    press_dict = {
+        "BaryCDI": np.stack([
+            reconstruct_mach_barycentric_cdi(
+                float(t_val), T_map, S_map, barycenters, p0, p1,
+                interp0_p, interp1_p, inside_body_cdi, domain_lo_cdi, domain_hi_cdi)
+            for t_val in t_array]),
+        "Linear": np.stack([(1.0-t_val)*p0 + t_val*p1 for t_val in t_array]),
+    }
+    if ffd_maps is not None:
+        T_ffd, S_ffd = ffd_maps
+        press_dict["FFD"] = np.stack([
+            reconstruct_mach_barycentric_cdi(
+                float(t_val), T_ffd, S_ffd, barycenters, p0, p1,
+                interp0_p, interp1_p, inside_body_cdi, domain_lo_cdi, domain_hi_cdi)
+            for t_val in t_array])
 
     # ── Error vs. high-resolution reference ───────────────────────────────────
+    err_dict = None
+    aero_dict = None
     if ref_bundle_paths and len(ref_bundle_paths) == 9:
         print("  Computing interpolation error vs. reference solutions …")
-        compute_interpolation_error(
-            t_array, mach_bcdi, mach_lin,
+        err_dict = compute_interpolation_error(
+            t_array, methods_dict,
             ref_bundle_paths, mesh, output_dir,
             wass_gamma=wass_gamma, wass_iter=wass_iter,
             compute_w2=compute_w2)
+        aero_dict = compute_aero_coefficients(
+            t_array, press_dict, ref_bundle_paths, mesh, output_dir,
+            gamma_gas=drift_gamma_gas)
     else:
         print("  (no ref_bundle_paths provided — skipping ground-truth error)")
 
@@ -1630,5 +1836,91 @@ def run_mach_interpolation_case(
                       title=f"SB-CDI (barycentric)  t={t_val:.2f}",
                       filename=os.path.join(output_dir, f"Mach_BaryCDI_t{t_val:.2f}.png"),
                       cmap="viridis")
+        if mach_ffd is not None:
+            plot_solution(mesh, mach_ffd[i], labels=r"$M$",
+                          title=f"FFD registration  t={t_val:.2f}",
+                          filename=os.path.join(output_dir, f"Mach_FFD_t{t_val:.2f}.png"),
+                          cmap="viridis")
+
+    # ── [8] Machine-readable metrics (consumed by SB/sweep_analysis.py) ───────
+    import json as _json
+    from datetime import datetime as _dt
+    # Trust-gate reverts: gated cells are set EXACTLY to their barycenter — a
+    # genuine conditional mean never lands exactly on it, so equality counts them.
+    gate_T = int(np.sum(np.all(T_map == barycenters, axis=1)))
+    gate_S = int(np.sum(np.all(S_map == barycenters, axis=1)))
+    metrics = {
+        "timestamp": _dt.now().isoformat(timespec="seconds"),
+        "output_dir": output_dir,
+        "config": {
+            "bundle0": bundle_path0, "bundle1": bundle_path1, "mesh": mesh_path,
+            "n_cells": int(N_cells), "n_frames": int(n_frames),
+            "reference_drift": reference_drift or "null",
+            "gamma_schedule": [float(x) for x in schedule],
+            "gamma_final": float(gamma_sb),
+            "density_mode": density_mode, "hessian_mode": hessian_mode,
+            "hessian_lp": float(hessian_lp), "sensor_p": int(sensor_p),
+            "num_iter": int(num_iter), "anderson_m": int(anderson_m),
+            "ipfp_cfl": float(ipfp_cfl), "ipfp_tol": float(IPFP_TOL),
+            "compute_w2": bool(compute_w2), "wass_gamma": float(wass_gamma),
+            "wass_iter": int(wass_iter),
+            "mach0_inlet": mach0_inlet, "mach1_inlet": mach1_inlet,
+        },
+        "drift": {
+            "use_drift": bool(use_drift),
+            "beta_max": float(beta_max) if use_drift else 0.0,
+            "peclet_max": float(pe_max) if use_drift else 0.0,
+        },
+        "ipfp": {
+            "stages": ipfp_stages,
+            "total_time_s": float(t_total),
+            "total_iters": int(len(ipfp_residuals)),
+            "final_residual": float(ipfp_residuals[-1]) if ipfp_residuals else None,
+            "final_residual_l2": (float(ipfp_residuals_l2[-1])
+                                  if ipfp_residuals_l2 else None),
+            "converged": bool(ipfp_residuals and ipfp_residuals[-1] < IPFP_TOL),
+            "stage_bounds": [int(b) for b in stage_bounds],
+            "residual_history": [float(r) for r in ipfp_residuals],
+            "residual_l2_history": [float(r) for r in ipfp_residuals_l2],
+        },
+        "maps": {
+            "den_T_min": float(den_T.min()), "den_T_max": float(den_T.max()),
+            "den_S_min": float(den_S.min()), "den_S_max": float(den_S.max()),
+            "bias_T_max": float(np.linalg.norm(bias_T, axis=1).max()),
+            "bias_S_max": float(np.linalg.norm(bias_S, axis=1).max()),
+            "gate_reverts_T": gate_T, "gate_reverts_S": gate_S,
+            "mean_disp_T_shock": [float(md_f[0]), float(md_f[1])],
+            "mean_disp_S_shock": [float(md_b[0]), float(md_b[1])],
+            "sanity_cancel": [float(md_f[0] + md_b[0]), float(md_f[1] + md_b[1])],
+        },
+        "timings": {
+            "ipfp_s": float(t_total),
+            "interp_s": float(t_interp),
+            "interp_setup_s": float(t_setup),
+            # per-method reconstruction cost (the online/query cost, excluding the
+            # offline IPFP or FFD-registration solve)
+            "recon_s": {
+                "BaryCDI": float(t_recon_sb),
+                "Linear": float(t_recon_lin),
+                **({"FFD": float(t_recon_ffd)} if t_recon_ffd is not None else {}),
+            },
+            # offline setup cost per method: SB pays the IPFP, FFD pays registration
+            "offline_s": {
+                "BaryCDI": float(t_total),
+                "Linear": 0.0,
+                **({"FFD": float(t_ffd_reg)} if t_ffd_reg is not None else {}),
+            },
+        },
+        # {"BaryCDI"/"Linear": {"l2","linf","w2"}} at t=0.1..0.9 (numpy → lists)
+        "errors": ({m: {k: [float(v) for v in arr] for k, arr in d.items()}
+                    for m, d in err_dict.items()} if err_dict else None),
+        # C_D/C_L per method at t=0.1..0.9 plus the reference values they are
+        # measured against — the scalar, physics-level counterpart to "errors".
+        "aero": aero_dict,
+        "t_ref": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9] if err_dict else None,
+    }
+    with open(os.path.join(output_dir, "metrics.json"), "w") as fh:
+        _json.dump(metrics, fh, indent=1)
+    print(f"    metrics.json written")
 
     print(f"  Done → {output_dir}/")

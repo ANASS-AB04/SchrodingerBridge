@@ -51,7 +51,7 @@ from . import heat_solver
 # ─────────────────────────────────────────────────────────────────────────────
 
 def compute_n_steps_advdiff(mesh, gamma_diff, beta_max, t_target=1.0,
-                            CFL_diff=0.5, CFL_adv=0.5, pct=10):
+                            CFL_diff=0.5, CFL_adv=0.5, pct=10, warn=True):
     """
     Number of explicit RK2-SSP steps for ∂_τu = β·∇u + γΔu, from the tighter of
     the diffusive (dt ≤ CFL·dx²/γ) and advective (dt ≤ CFL·dx/|β|) limits.
@@ -60,10 +60,7 @@ def compute_n_steps_advdiff(mesh, gamma_diff, beta_max, t_target=1.0,
     Falls back to the pure-diffusion count of ``heat_solver.compute_n_steps``
     when ``beta_max`` is ~0.
     """
-    dx_i = (np.asarray(mesh.area)
-            / np.sum(np.asarray(mesh.surface)[
-                         np.asarray(mesh.face_connectivity)], axis=-1))
-    dx_ref = float(np.percentile(dx_i, pct))
+    dx_ref = heat_solver.reference_cell_size(mesh, pct)
     dt_diff = CFL_diff * dx_ref ** 2 / gamma_diff
     beta_max = float(beta_max)
     if beta_max <= 1e-14:
@@ -71,7 +68,10 @@ def compute_n_steps_advdiff(mesh, gamma_diff, beta_max, t_target=1.0,
     else:
         dt_adv = CFL_adv * dx_ref / beta_max
         dt_max = min(dt_diff, dt_adv)
-    return max(int(np.ceil(t_target / dt_max)), 1)
+    n = max(int(np.ceil(t_target / dt_max)), 1)
+    if warn:
+        heat_solver.check_resolution(dx_ref, gamma_diff, n, label="advdiff")
+    return n
 
 
 # ─────────────────────────────────────────────────────────────────────────────

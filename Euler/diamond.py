@@ -211,10 +211,23 @@ if __name__ == "__main__":
     Lx = 4.0; Ly = 4.0; h = 0.1
     chord = 1.0; cx = 1.5; cy = Ly / 2
 
-    # Alpha est le demi angle du losange, height est la hauteur totale du losange
+    # Alpha est le demi angle du losange, height est la hauteur totale du losange.
+    # NE PAS CHANGER sans régénérer TOUS les maillages : les maillages fins
+    # livrés auparavant avaient alpha=10° (height=0.176) alors que h0.025 est à
+    # 5° (height=0.0875), donc une étude de raffinement comparait deux profils
+    # différents.  Les anciens 10° sont archivés dans meshes/diamond/alpha10/.
     alpha = np.radians(5)
     height = chord * np.tan(alpha)
 
-    for h in [0.025, 0.035, 0.05]:
+    # h fins (0.0175, 0.0125) pour l'étude de convergence en maillage.
+    # --h permet de n'en régénérer qu'une partie : réécrire un maillage déjà
+    # utilisé (h0.025) invaliderait les snapshots Euler et les runs SB existants.
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--h", type=float, nargs="+", default=[0.0125, 0.0175, 0.025, 0.035, 0.05])
+    args = ap.parse_args()
+
+    for h in args.h:
         mesh, path = build_mesh(Lx=Lx, Ly=Ly, h=h, chord=chord, height=height, cx=cx, cy=cy, export_vtk=False)
+        assert abs(mesh.metadata["height"] - height) < 1e-12, "height metadata mismatch"
         mesh.plot_mesh(filename=mesh_dir / f"diamond_h{h}.png", dpi=500)

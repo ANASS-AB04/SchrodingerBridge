@@ -51,6 +51,12 @@ num_iter   = 1000          # Anderson IPFP iteration cap
 anderson_m = 5              # Anderson acceleration memory window (0 = plain Sinkhorn)
 debug_ipfp = false          # true → run the plain-Sinkhorn calibration tool instead of the pipeline
 ipfp_cfl   = 0.5           # CFL for the FVM heat solve inside IPFP (SSP-RK2 stable up to 1.0)
+# IPFP stopping tolerance on the L∞ potential increment max|f_new − f|.  This is
+# an UNNORMALISED max over N cells, so a finer mesh samples the shock and the
+# wedge corner more densely and reports a larger residual for the same physical
+# state — expect to relax this on refined meshes.  metrics.json also records an
+# area-weighted RMS residual (residual_l2_history) to tell the two apart.
+ipfp_tol   = 1e-7
 
 
 # Heat-equation smoothing applied to the raw density before IPFP
@@ -98,7 +104,10 @@ hessian_mode = "eig"        # "det" = (det|H|) node density; "eig" = |lambda_max
 # density_mode = "field" only
 field_source    = "grad_mach"  # pert_mach |M-M∞|, pert_p, grad_mach ‖∇M‖, grad_p, combo
 field_floor_pct = 50.0         # percentile subtracted to remove the freestream baseline
-[drift.ffd]
+# FFD-registration drift parameters (reference_drift = "ffd").
+# MUST live under [run.mach.drift.ffd] — main.py reads cmach["drift"]["ffd"].
+# A top-level [drift.ffd] is silently ignored (main.py raises on it).
+[run.mach.drift.ffd]
 grid_n = 144
 n_cp = [10, 10]                  # Bernstein lattice (degree = n_cp − 1)
 alpha_algn = 1.0

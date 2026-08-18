@@ -201,6 +201,26 @@ def apply_IPFP_2d(log_mu0, log_mu1, gamma, mesh, num_iter=50, n_steps=100):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Residual norms
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _area_weights(mesh):
+    """Cell areas normalised to sum to 1 — the discrete measure for the L² residual.
+
+    The IPFP stopping test is ``max|f_new − f|``, an UNNORMALISED L∞ over N cells.
+    Refining the mesh samples the shock and the wedge corner more densely, so the
+    same physical state reports a larger max: the criterion tightens implicitly
+    with resolution.  ``sqrt(Σ wᵢ·rfᵢ²)`` with these weights is a genuine L²(dx)
+    norm and converges to a mesh-independent number, so logging both tells you
+    whether a stalled run is physically unconverged or merely tripping over a
+    handful of cells.
+    """
+    area = np.asarray(mesh.area, dtype=float).ravel()
+    total = float(area.sum())
+    return area / total if total > 0.0 else np.full_like(area, 1.0 / max(area.size, 1))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  IPFP 2-D — Anderson(m) acceleration  ← USE THIS FOR PRODUCTION MACH RUNS
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -225,14 +245,19 @@ def apply_IPFP_2d_anderson(log_mu0, log_mu1, gamma, mesh, n_steps,
     tol    : convergence threshold on max‖Δf‖ (1e-4 is sufficient for CDI)
     f_init : warm-start for f (e.g. result from previous annealing stage)
     g_init : warm-start for g
+
+    Returns ``(f, g, residuals, residuals_l2)`` — see ``_area_weights`` for why
+    the second residual history is worth carrying.
     """
     N = mesh.tris.shape[0]
     f = jnp.zeros(N) if f_init is None else jnp.asarray(f_init)
     g = jnp.zeros(N) if g_init is None else jnp.asarray(g_init)
+    w = _area_weights(mesh)
 
     X_hist: list = []   # concatenated (f,g) proposals,  each shape (2N,)
     R_hist: list = []   # corresponding residuals,        each shape (2N,)
     residuals    = []
+    residuals_l2 = []
 
     for k in range(num_iter):
         g_new = log_mu1 - apply_logPt_fvm(f, 1.0, gamma, mesh, n_steps)
@@ -242,6 +267,7 @@ def apply_IPFP_2d_anderson(log_mu0, log_mu1, gamma, mesh, n_steps,
         rg  = np.asarray(g_new - g)
         res = float(np.max(np.abs(rf)))
         residuals.append(res)
+        residuals_l2.append(float(np.sqrt(np.sum(w * rf**2))))
 
         if (k+1) % print_every == 0:
             eta = ""
@@ -283,7 +309,7 @@ def apply_IPFP_2d_anderson(log_mu0, log_mu1, gamma, mesh, n_steps,
         f    = jnp.array(x_aa[:N])
         g    = jnp.array(x_aa[N:])
 
-    return f, g, residuals
+    return f, g, residuals, residuals_l2
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -301,14 +327,18 @@ def apply_IPFP_2d_anderson_drift(log_mu0, log_mu1, gamma, mesh, beta_cells, n_st
                                  num_iter=4000, tol=1e-5, m=5, print_every=50,
                                  f_init=None, g_init=None):
     """Anderson(m)-accelerated drifted IPFP.  See module header and the heat
-    version apply_IPFP_2d_anderson for the acceleration details."""
+    version apply_IPFP_2d_anderson for the acceleration details.
+
+    Returns ``(f, g, residuals, residuals_l2)``."""
     N = mesh.tris.shape[0]
     f = jnp.zeros(N) if f_init is None else jnp.asarray(f_init)
     g = jnp.zeros(N) if g_init is None else jnp.asarray(g_init)
+    w = _area_weights(mesh)
 
     X_hist: list = []
     R_hist: list = []
     residuals    = []
+    residuals_l2 = []
 
     for k in range(num_iter):
         # eq. (ipfpdrift): f uses Q (non-conservative), g uses Q† (conservative)
@@ -319,6 +349,7 @@ def apply_IPFP_2d_anderson_drift(log_mu0, log_mu1, gamma, mesh, beta_cells, n_st
         rg  = np.asarray(g_new - g)
         res = float(np.max(np.abs(rf)))
         residuals.append(res)
+        residuals_l2.append(float(np.sqrt(np.sum(w * rf**2))))
 
         if (k+1) % print_every == 0:
             eta = ""
@@ -360,7 +391,7 @@ def apply_IPFP_2d_anderson_drift(log_mu0, log_mu1, gamma, mesh, beta_cells, n_st
         f    = jnp.array(x_aa[:N])
         g    = jnp.array(x_aa[N:])
 
-    return f, g, residuals
+    return f, g, residuals, residuals_l2
 
 
 # ─────────────────────────────────────────────────────────────────────────────

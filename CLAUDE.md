@@ -12,9 +12,26 @@ The overall goal is generative PDE solving: use the Euler solver to generate CFD
 
 ## Environment & Dependencies
 
-- Python 3.11 (strict), managed with `uv`
+- **Python 3.12** (`requires-python = ">=3.12,<3.13"`), managed with `uv`. (Was 3.11;
+  bumped because the `phdtruel` FFD framework used by `reference_drift="ffd"` needs
+  `typing.override` + a PEP 695 `type` alias, both 3.12-only.)
 - JAX with CUDA (GPU required for production runs)
-- Key packages: `jax`, `numpy`, `scipy`, `matplotlib`, `meshpy`, `meshio`, `scikit-learn`
+- Key packages: `jax[cuda12]`, `numpy<2`, `scipy`, `matplotlib`, `meshpy`, `meshio`,
+  `scikit-learn`, plus the FFD-drift deps (`chex`, `optax`, `jaxtyping`, `interpax`,
+  `pycpd`, `pot`, `hickle`, `h5py`, `pyyaml`) that the vendored `phdtruel/` package needs.
+- `phdtruel/` is a vendored JAX framework (imported via `sys.path`, not pip-installed);
+  its FFD-registration mappings back `reference_drift="ffd"`. Its runtime deps must be
+  **explicit** in `pyproject.toml` (it ships no metadata, so they resolve as orphans).
+- `marker-pdf` lives in the optional `docs` dependency group, NOT the default install —
+  it pulls `torch → nvidia-cudnn-cu13`, which collides with jax's `nvidia-cudnn-cu12`
+  (`undefined symbol: cudnnGetLibConfig`). Install on demand with `uv sync --group docs`.
+
+**CUDA on the cluster**: `jax[cuda12]` wheels bundle their own CUDA + cuDNN and run on
+newer drivers (e.g. 13.2) via forward-compat. Do **not** `module load` a system CUDA
+toolkit — its older `libcudnn` shadows the pip one and reproduces the `cudnnGetLibConfig`
+error. In SLURM scripts: `module purge`, then `export LD_LIBRARY_PATH=""`. After any
+dependency change, `rm -rf .venv` on the cluster so `uv` rebuilds cleanly (rsync-based
+sync typically excludes `.venv`, so a stale env persists otherwise).
 
 ```bash
 # Install dependencies
@@ -60,12 +77,24 @@ uv run python Euler/diamond.py   # generates meshes/diamond/diamond_h*.npy
 JAX_ENABLE_X64=true uv run python SB/main.py
 ```
 `SB/main.py` takes **no command-line arguments** — every run parameter (which case to run,
-1D/2D/Mach settings, density mode, etc.) is read from `SB/Config.toml`. Edit `Config.toml`'s
-`run.case` to select a pipeline (1D synthetic, 2D synthetic, or `2d_mach_interpolation`) and
-`run.mach.*` to configure the Mach interpolation (density mode, field source, bundle/mesh
-paths per `run.mach.case`).
+1D/2D/Mach settings, density mode, drift mode, etc.) is read from `SB/Config.toml`, or from
+the file named by the `SB_CONFIG` env var if set (used to run several configs in one job —
+see the SLURM section). Edit `Config.toml`'s `run.case` to select a pipeline (1D synthetic,
+2D synthetic, or `2d_mach_interpolation`) and `run.mach.*` to configure the Mach interpolation
+(density mode, field source, **reference drift**, γ-schedule, bundle/mesh paths per
+`run.mach.case`).
 
 **Important**: `jax_enable_x64=True` must be set before any JAX arrays are created (done at module import in `SB/main.py`). Omitting this causes IPFP probability truncation bugs.
+
+**Reference drift** (`run.mach.reference_drift`) conditions the bridge so it converges at
+small γ (see "Reference drift" under Architecture):
+- `"null"`  — pure-heat bridge (β≡0). Keep `gamma_sb_schedule` γ_min ≈ **0.005**; the
+  heat bridge does not converge much lower near the OT limit (residual stalls, kernel
+  collapses → garbage maps).
+- `"oblique"` — analytic θ-β-M diamond drift. Anneal down to **1e-4** (requires
+  `mach0_inlet`/`mach1_inlet`).
+- `"ffd"` — data-driven drift from FFD registration of the two marginals via `phdtruel`.
+  Anneal down to **1e-4**. β is cached to the output dir (`ffd_beta_<hash>.npz`).
 
 ### Linting & Type Checking
 ```bash
@@ -75,9 +104,47 @@ uv run mypy Euler/ SB/
 
 ### HPC (SLURM)
 ```bash
-sbatch bump_test.sbatch           # bump case
-sbatch run_diamond_test.sbatch    # diamond case
+sbatch bump_test.sbatch           # Euler bump case
+sbatch run_diamond_test.sbatch    # Euler diamond case
+sbatch run_sb.sbatch              # SB Mach interpolation
 ```
+`run_sb.sbatch` runs the **oblique, ffd and null** drift cases in one job. All shared
+parameters come from `SB/Config.toml` (single source of truth); the script derives one
+config per case with `sed`, overriding only `reference_drift` and `gamma_sb_schedule`
+(oblique/ffd → `[0.0003, 0.0002, 0.0001]`, null → `[0.02, 0.01, 0.005]`), and points
+`SB_CONFIG` at each. `main.py` routes each to its own output dir
+(`…/drift_<mode>/gmin<γ>/`), so the runs never clobber each other. A failing case logs a
+`[WARN]` and the others still run.
+
+The script does `module purge` + `export LD_LIBRARY_PATH=""` (no system CUDA module) — see
+the CUDA note under Environment.
+
+**Parameter sweep**: `sbatch run_sb_sweep.sbatch` runs the full γ_min × drift × hessian_mode
+study (12 γ from 0.5→1e-4 × {null, oblique, ffd} × {eig, det} = 72 combos) as a SLURM
+**array job** (`--array=0-71%4`; the throttle self-adapts if the cluster allows fewer
+concurrent jobs). Each run's schedule is the ladder **prefix** down to its γ_min (identical
+warm-start path + same `num_iter` cap → fair A/B), W₂ on. Test one combo with
+`sbatch --array=42 run_sb_sweep.sbatch`. Every Mach run writes a **`metrics.json`**
+(config echo, per-stage IPFP stats + residual history, map diagnostics incl. trust-gate
+revert counts, L2/L∞/W₂ error tables, timings). Aggregate with
+`uv run python SB/sweep_analysis.py` (pure numpy/matplotlib, no GPU — run locally after
+rsync-ing `outputs/`): writes error-vs-γ curves, γ-graded error-vs-t, IPFP convergence,
+gain heatmap, map diagnostics, **cost-vs-γ**, **cost-vs-accuracy Pareto**, **SB-vs-FFD
+head-to-head**, and CSV tables to `<root>/_sweep/`.
+
+**Three interpolation methods** are compared in every run (see `compute_interpolation_error`,
+which takes an ordered `{name: field_sequence}` dict):
+- `BaryCDI` — the SB barycentric transport interpolation (**γ-dependent**).
+- `Linear` — naive `(1−t)M₀ + tM₁` (γ-independent, zero transport).
+- `FFD` — the FFD registration used **directly** as an interpolator: the same CDI formula
+  but with the raw registration maps `T = x+β`, `S = x+α` instead of the SB maps
+  (γ-independent). Only present when `reference_drift="ffd"`. This is the control that
+  isolates what the Schrödinger bridge adds *on top of* the registration it is built from —
+  if SB never beats FFD, the bridge is not paying for its IPFP cost.
+
+`metrics.json` records the cost split per method: `timings.offline_s` (SB pays the IPFP
+anneal, FFD pays the registration, Linear pays nothing) and `timings.recon_s` (the online
+query cost). The Pareto plot uses offline+online, so accuracy claims are always priced.
 
 ## Architecture
 
@@ -114,26 +181,35 @@ Euler/
 
 ```
 SB/
-├── main.py        — Entry point: reads Config.toml, dispatches to the 1D / 2D / Mach pipeline
-├── Config.toml    — Single source of truth for every run parameter (no CLI args)
-├── utils.py       — Pipeline runners (run_1d_case, run_2d_case, run_mach_interpolation_case) + physics helpers
-├── resolution.py  — IPFP algorithm (1D and 2D FVM variants)
-├── heat_solver.py — FVM heat equation solver (used as the SB semigroup)
-├── plot.py        — SB-specific plots (density transport, drift field, entropy, L2/L∞ error)
-└── testcases.py   — 1D/2D synthetic test cases (Gaussian, OU, bimodal)
+├── main.py          — Entry point: reads Config.toml (or $SB_CONFIG), dispatches to 1D / 2D / Mach
+├── Config.toml      — Single source of truth for every run parameter (no CLI args)
+├── utils.py         — Pipeline runners + physics helpers + barycentric transport maps
+├── resolution.py    — IPFP (1D + 2D FVM heat variant + 2D drifted variant) & bridge retrieval
+├── heat_solver.py   — FVM heat semigroup ∂φ/∂t = γΔφ (the β≡0 SB kernel)
+├── advdiff_solver.py— FVM advection–diffusion semigroups Q / Q† (the drifted SB kernel)
+├── drift.py         — Reference drift β: analytic "oblique" builder, flow_map, make_inside_body
+├── ffd_drift.py     — Data-driven "ffd" drift: FFD registration of the marginals via phdtruel
+├── plot.py          — SB plots (density transport, drift field/sequence, entropy, L2/L∞ error)
+└── testcases.py     — 1D/2D synthetic test cases (Gaussian, OU, bimodal)
 ```
 
 **SB pipeline** (`run_mach_interpolation_case` in `utils.py`):
 1. Load two Euler snapshots (bundles `.npz`) at Mach M₀ and M₁
-2. Convert to probability densities (the `density_mode` marginal — Ducros sensor mask, screened/TV inpainting, whole-disturbance field, or shock iso-curve ridge; see `transform_to_shock_density`)
-3. Run **Anderson-accelerated IPFP** (`apply_IPFP_2d_anderson`) to find the Schrödinger Bridge potentials `f`, `g` — requires `Float64` for convergence
-4. Compute global boundary-corrected **barycentric transport maps** `T`/`S` (`compute_sb_barycentric_maps`) and reconstruct intermediate Mach fields via gradient-free **barycentric SB-CDI** (`reconstruct_mach_barycentric_cdi`), compared against a linear baseline
-5. If 9 reference bundles are configured, compute L2/L∞ error vs. high-resolution references and always plot both error curves plus per-method abs-error grids
-6. Plot density transport, drift fields, and interpolated Mach frames
+2. Convert to probability densities (the `density_mode` marginal — Ducros sensor mask, screened/TV inpainting, whole-disturbance field, shock iso-curve ridge, or **Alauzet–Loseille Hessian metric** density; see `transform_to_shock_density`)
+3. Optionally build a **reference drift β** (`reference_drift` ∈ `null`/`oblique`/`ffd`) that conditions the bridge
+4. Run **Anderson-accelerated IPFP** — `apply_IPFP_2d_anderson` (heat) or `apply_IPFP_2d_anderson_drift` (drifted Q/Q†) — with **γ-annealing** (a decreasing `gamma_sb_schedule`, each stage warm-started from the previous `f,g`) to find the potentials `f`, `g`. Requires `Float64`.
+5. Compute global boundary-corrected **barycentric transport maps** `T`/`S` — `compute_sb_barycentric_maps` (heat) or `compute_sb_barycentric_maps_drift` (drifted) — and reconstruct intermediate Mach fields via gradient-free **barycentric SB-CDI** (`reconstruct_mach_barycentric_cdi`), vs. a linear baseline
+6. If 9 reference bundles are configured, compute L2/L∞ (and optional W₂) error vs. high-resolution references and plot the error curves plus per-method abs-error grids
+7. Plot density transport, the drift field (`plot_drift_field`), the **per-timestep drift grid** (`plot_drift_sequence`, drifted cases only), entropy, and interpolated Mach frames
 
-**IPFP algorithm** (`resolution.py`): Iterative Proportional Fitting Procedure on log-space potentials. The 2D version uses the FVM heat semigroup (`apply_logPt_fvm`) as the Markov kernel instead of an explicit kernel matrix. The `@partial(jax.jit, static_argnames=['num_iter'])` decoration is critical for performance.
+**IPFP algorithm** (`resolution.py`): Iterative Proportional Fitting on log-space potentials, using an FVM semigroup as the Markov kernel (no explicit kernel matrix). β≡0 uses the self-adjoint heat semigroup `apply_logPt_fvm`; a reference drift uses the advection–diffusion semigroups `apply_logQt_fvm` (Q, non-conservative backward) and `apply_logQt_adjoint_fvm` (Q†, conservative forward). Anderson(m) acceleration is done on CPU (numpy least-squares) around the JIT'd kernel solves.
 
-**Key design constraint**: The SB module uses `sys.path` manipulation to import from `Euler/` — it adds both the repo root and `Euler/` to `sys.path` at startup. Do not reorganize imports without accounting for this.
+**Reference drift** (see `SB/referrence_drift.tex` eqs. for the math):
+- **Barycentric maps** — for β≡0, `T = P₁[id·e^g]/P₁[e^g] − β_bias`, `S` analogously, sharing one Neumann identity-leak bias `β_bias = P₁[id]/P₁[1] − id`; T,S → identity far from the transported feature. Self-adjoint, so numerator/denominator blow-ups cancel in the ratio — no trust gate needed.
+- **Drifted maps** (`compute_sb_barycentric_maps_drift`) — T from `g` via Q, S from `f` via Q†. Because Q ≠ Q† the cancellation breaks, so: (a) the leak bias is measured against the drift's own **reflected deterministic flow** Φ_β (`drift.flow_map`, integrated with the same no-flux boundaries + body-retraction the kernel uses via `drift.make_inside_body`), NOT the identity and NOT the unbounded analytic flow; (b) a **trust gate** reverts kernel-collapse outlier cells (displacement > max|Φ−x| + 4σ) to the identity.
+- **CDI reconstruction** — query points are clamped to the mesh bbox; points inside the solid body (exact `make_inside_body` predicate) or outside the Delaunay hull fall back to the **undisplaced endpoint value** (local identity), not to the nearest fluid cell (which can be the wrong side of the body).
+
+**Key design constraint**: The SB module uses `sys.path` manipulation to import from `Euler/` (and `phdtruel/` for the FFD drift) — it adds the repo root and `Euler/` to `sys.path` at startup. Do not reorganize imports without accounting for this.
 
 ### Mesh Format
 
@@ -150,12 +226,21 @@ meshes/diamond/              ← pre-generated diamond meshes
 outputs/                              ← SB interpolation outputs (set via run.output_dir)
 ├── 1d_test_case/                     ← 1D synthetic cases
 ├── 2d_test_case/                     ← 2D synthetic cases
-└── Mach_interpolation/               ← Mach field interpolation, split by density_mode
+└── Mach_interpolation/<case>/        ← Mach field interpolation (<case> = diamond | bump)
     ├── ducros/                       ← density_mode = "mask"
     ├── denoising/{screened,tv}/      ← density_mode = "screened" | "tv"
-    ├── iso/<field_source>/           ← density_mode = "field" (pert_mach, pert_p, grad_mach, grad_p, combo)
+    ├── field/<field_source>/         ← density_mode = "field" (pert_mach, pert_p, grad_mach, grad_p, combo)
+    ├── iso/contours/                 ← density_mode = "iso"
+    ├── iso/hessian/{det,eig}/        ← density_mode = "iso_hessian" (Alauzet–Loseille metric)
     └── isocurve/                     ← density_mode = "isocurve"
+        └── …/drift_<mode>/gmin<γ>/   ← final split: drift_null|oblique|ffd × smallest annealed γ
 ```
+
+`density_mode = "iso_hessian"` has two sub-modes (`hessian_mode`): `"det"` (node density
+∝ (det|H|)^{p/(2p+2)}) and `"eig"` (|λ_max| feature strength). Use `"eig"` for the
+reference-drift A/B — `"det"` collapses on the straight diamond legs, leaving no mass on
+the shocks the drift is meant to move. Every Mach run's final directory is
+`…/drift_<reference_drift>/gmin<min(gamma_sb_schedule)>/`.
 
 ## JAX-Specific Notes
 
@@ -164,3 +249,5 @@ outputs/                              ← SB interpolation outputs (set via run.
 - `jax_enable_x64=True` is mandatory for the SB module (IPFP needs Float64 precision)
 - On SLURM: set `XLA_PYTHON_CLIENT_PREALLOCATE=false` to avoid GPU memory issues; use `JAX_COMPILATION_CACHE_DIR` for repeated runs
 - The transonic regime (0.6 < M < 1.1) automatically reduces CFL to 0.4
+- **γ-annealing (ε-scaling)**: the IPFP reaches small γ (near the OT limit) by warm-starting each `gamma_sb_schedule` stage from the previous stage's `(f,g)`. Cold-starting at small γ diverges. The drifted kernel step count comes from `advdiff_solver.compute_n_steps_advdiff` (advective + diffusive CFL); the heat kernel from `heat_solver.compute_n_steps`.
+- **Anderson IPFP** (`apply_IPFP_2d_anderson[_drift]`) runs the acceleration on CPU/numpy around JIT'd GPU kernel solves; it prints per-`print_every` residuals and stops at `tol` or `num_iter`.

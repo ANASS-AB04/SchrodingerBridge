@@ -30,7 +30,52 @@ from functools import partial
 #  Step-count helper  (pure numpy, returns a Python int)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def compute_n_steps(mesh, gamma_diff, t_target=1.0, CFL=0.5, pct=10):
+#  Guards fire at most once per (label, γ, dx_ref) so the γ-annealing loop and
+#  the per-frame kernel calls do not spam thousands of identical warnings.
+_WARNED: set = set()
+
+
+def reference_cell_size(mesh, pct=10):
+    """The *pct*-th percentile of dxᵢ = areaᵢ / Σ_f surfaceᵢf — the CFL length scale.
+
+    Shared by the heat and advection–diffusion step-count helpers so the two
+    kernels always agree on what "the" cell size is.
+    """
+    dx_i = (np.asarray(mesh.area)
+            / np.sum(np.asarray(mesh.surface)[
+                         np.asarray(mesh.face_connectivity)], axis=-1))
+    return float(np.percentile(dx_i, pct))
+
+
+def check_resolution(dx_ref, gamma_diff, n_steps, label="heat", n_budget=20000):
+    """Warn when the kernel is under-resolved or absurdly expensive.
+
+    Two independent failure modes, neither of which the solver detects on its own:
+
+    * ``σ = √(2γ) < 3·dx`` — the heat kernel is narrower than a few cells, so the
+      FVM semigroup no longer represents exp(γΔ) and the bridge it feeds is
+      meaningless rather than merely inaccurate.
+    * ``n_steps`` past a budget — cost is ∝ 1/dx², so refining a mesh at fixed γ
+      inflates this quadratically.  Printing it up front turns a run that would
+      silently take days into one that says so in its first seconds.
+    """
+    key = (label, float(gamma_diff), round(dx_ref, 12))
+    if key in _WARNED:
+        return
+    _WARNED.add(key)
+    sigma = float(np.sqrt(2.0 * gamma_diff))
+    if sigma < 3.0 * dx_ref:
+        print(f"    [WARN] {label} kernel under-resolved: σ=√(2γ)={sigma:.3e} < 3·dx="
+              f"{3.0*dx_ref:.3e}  (γ={gamma_diff:.3e}, dx={dx_ref:.3e}).  The FVM "
+              f"semigroup cannot represent exp(γΔ) at this γ on this mesh — raise γ "
+              f"or coarsen.")
+    if n_steps > n_budget:
+        print(f"    [WARN] {label} kernel needs n_steps={n_steps} (> {n_budget}) at "
+              f"γ={gamma_diff:.3e}, dx={dx_ref:.3e}.  Cost per semigroup solve scales "
+              f"as 1/dx²; expect this run to be ~{n_steps/n_budget:.1f}× the budgeted time.")
+
+
+def compute_n_steps(mesh, gamma_diff, t_target=1.0, CFL=0.5, pct=10, warn=True):
     """
     Number of explicit RK2-SSP steps required to integrate ∂φ/∂t = γ Δφ
     from 0 to t_target, with the CFL condition based on the *pct*-th
@@ -46,12 +91,11 @@ def compute_n_steps(mesh, gamma_diff, t_target=1.0, CFL=0.5, pct=10):
     The 10th-percentile ignores the worst 10 % of cells; their slightly
     larger per-cell truncation error is negligible for smooth transport.
     """
-    dx_i = (np.asarray(mesh.area)
-            / np.sum(np.asarray(mesh.surface)[
-                         np.asarray(mesh.face_connectivity)], axis=-1))
-    dx_ref = float(np.percentile(dx_i, pct))
+    dx_ref = reference_cell_size(mesh, pct)
     dt_max = CFL * dx_ref ** 2 / gamma_diff
     n = max(int(np.ceil(t_target / dt_max)), 1)
+    if warn:
+        check_resolution(dx_ref, gamma_diff, n, label="heat")
     return n
 
 

@@ -202,7 +202,12 @@ def register_pair(mu0_grid, mu1_grid, mesh_jx, cfg):
 # ─────────────────────────────────────────────────────────────────────────────
 def build_ffd_beta(mesh, mu0_smooth, mu1_smooth, cfg=None, cache_dir=None,
                    tag=""):
-    """(N,2) float64 reference drift from FFD registration of the marginals.
+    """FFD registration of the two marginals → (beta, alpha), both (N,2) float64.
+
+    beta  = T(x,s=1) − x : forward displacement  (μ₀→μ₁) — the SB reference drift.
+    alpha = W(x,s=1) − x : backward displacement (μ₁→μ₀), W ≈ T⁻¹.  Used to run
+            the FFD registration as a stand-alone interpolator, so the sweep can
+            separate "what the registration gives" from "what the SB adds".
 
     Parameters
     ----------
@@ -231,9 +236,11 @@ def build_ffd_beta(mesh, mu0_smooth, mu1_smooth, cfg=None, cache_dir=None,
     cache = (os.path.join(cache_dir, f"ffd_beta_{h}.npz")
              if cache_dir else None)
     if cache and os.path.exists(cache):
-        beta = np.load(cache)["beta"]
-        print(f"    [ffd] loaded cached beta  ({cache})")
-        return beta
+        _d = np.load(cache)
+        if "alpha" in _d.files:                       # new-format cache
+            print(f"    [ffd] loaded cached beta+alpha  ({cache})")
+            return _d["beta"], _d["alpha"]
+        print(f"    [ffd] cache lacks the backward map — recomputing ({cache})")
 
     mesh_jx = _structured_mesh(lo, hi, c["grid_n"])
     F0 = _prep_marginal(bary, mu0_smooth, mesh_jx, c["smooth_extra_cells"])
@@ -245,11 +252,18 @@ def build_ffd_beta(mesh, mu0_smooth, mu1_smooth, cfg=None, cache_dir=None,
     T_cells = np.asarray(mapping_t(bary, s=1.0), dtype=float)
     beta = (T_cells - bary).astype(np.float64)
 
+    # Backward displacement alpha = W(x, s=1) − x  (W ≈ T⁻¹ via the bijectivity
+    # term).  Not needed for the SB drift, but it lets the caller use the FFD
+    # registration DIRECTLY as an interpolator — the control that isolates what
+    # the Schrödinger bridge adds on top of the raw registration map.
+    S_cells = np.asarray(mapping_w(bary, s=1.0), dtype=float)
+    alpha = (S_cells - bary).astype(np.float64)
+
     bmag = np.linalg.norm(beta, axis=1)
     print(f"    [ffd] |beta| max={bmag.max():.3f}  mean={bmag.mean():.4f}  "
           f"(grid {c['grid_n']}², lattice {c['n_cp']})")
 
     if cache:
-        np.savez_compressed(cache, beta=beta, **info)
+        np.savez_compressed(cache, beta=beta, alpha=alpha, **info)
         print(f"    [ffd] cached -> {cache}")
-    return beta
+    return beta, alpha

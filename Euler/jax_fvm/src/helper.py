@@ -362,10 +362,12 @@ def get_palinstrophy(grad, mesh):
     palin = jnp.linalg.norm(grad_omega, axis = -1)**2  # (N_cells, 1)
     return palin
 
-def get_drag_coefficient(W, mesh, rho_inf, U_inf, L_ref):
-	# Calcul du coefficient de trainée autour d'un obstacle 
-	Prim = getPrimitive(W)
-	P = Prim[:, 3]
+def get_wall_face_data(mesh):
+	"""(cell_ids, normals, ds) for the faces carrying the force marker.
+
+	Shared by every force-coefficient entry point so the wall integration is
+	defined in exactly one place.
+	"""
 	wall_marker = int(_mesh_metadata(mesh).get('force_marker', 2))
 	wall_faces = jnp.where(mesh.face_markers == wall_marker)[0]
 
@@ -377,41 +379,39 @@ def get_drag_coefficient(W, mesh, rho_inf, U_inf, L_ref):
 
 	cell_ids, local_faces = jax.vmap(get_face_data)(wall_faces)
 	normals = mesh.normals[cell_ids, local_faces]
-
-	nx = normals[:, 0]
-	ny = normals[:, 1]
 	ds = mesh.surface[wall_faces]
-	drag = jnp.sum(P[cell_ids] * nx * ds)
+
+	return cell_ids, normals, ds
+
+def get_force_coefficients_from_pressure(P, mesh, q_inf, L_ref):
+	"""(Cd, Cl) from a cell-centred pressure field alone.
+
+	The Euler force coefficients here are inviscid — pure ∮p·n over the body —
+	so pressure is the only state they need.  That matters downstream: the SB
+	module reconstructs *fields*, not the conservative vector W, so this is the
+	entry point it can actually use.  ``q_inf = ½ρ∞U∞²``.
+	"""
+	cell_ids, normals, ds = get_wall_face_data(mesh)
+	Pw = P[cell_ids] * ds
+	drag = jnp.sum(Pw * normals[:, 0])
+	lift = jnp.sum(Pw * normals[:, 1])
+	denom = q_inf * L_ref
+
+	return drag / denom, lift / denom
+
+def get_drag_coefficient(W, mesh, rho_inf, U_inf, L_ref):
+	# Calcul du coefficient de trainée autour d'un obstacle
+	P = getPrimitive(W)[:, 3]
 	q_inf = 0.5 * rho_inf * U_inf**2
 
-	Cd = drag / (q_inf * L_ref)
-
-	return Cd
+	return get_force_coefficients_from_pressure(P, mesh, q_inf, L_ref)[0]
 
 def get_lift_coefficient(W, mesh, rho_inf, U_inf, L_ref):
 	# Calcul du coefficient de portance autour d'un obstacle
-	Prim = getPrimitive(W)
-	P = Prim[:, 3]
-	wall_marker = int(_mesh_metadata(mesh).get('force_marker', 2))
-	wall_faces = jnp.where(mesh.face_markers == wall_marker)[0]
-
-	def get_face_data(fid):
-		cell_id = jnp.argmax(jnp.any(mesh.face_connectivity == fid, axis=1))
-		local_face = jnp.argmax(mesh.face_connectivity[cell_id] == fid)
-
-		return cell_id, local_face
-
-	cell_ids, local_faces = jax.vmap(get_face_data)(wall_faces)
-	normals = mesh.normals[cell_ids, local_faces]
-
-	ny = normals[:, 1]
-	ds = mesh.surface[wall_faces]
-	lift = jnp.sum(P[cell_ids] * ny * ds)
+	P = getPrimitive(W)[:, 3]
 	q_inf = 0.5 * rho_inf * U_inf**2
 
-	Cl = lift / (q_inf * L_ref)
-
-	return Cl
+	return get_force_coefficients_from_pressure(P, mesh, q_inf, L_ref)[1]
 
 
 def _mesh_arrays(mesh):

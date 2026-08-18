@@ -1,0 +1,609 @@
+\documentclass[aspectratio=169]{beamer}
+
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{caption}
+\usepackage{tikz}
+\usetikzlibrary{positioning, shapes.geometric, arrows.meta}
+
+\graphicspath{{outputs/}{../outputs/}}
+
+\usetheme{Madrid}
+\usecolortheme{default}
+\setbeamertemplate{navigation symbols}{}
+
+\title[Schrödinger Bridge ROMs]{Schrödinger Bridge for Non-linear ROMs}
+\subtitle{Reference Drifts, FFD Registration and the $\gamma$-Sweep}
+\author{Aboufadel Anas}
+\date{\today}
+
+% --- Custom Vector/Matrix Macros ---
+\newcommand{\bt}{\mathbf{b}}
+\newcommand{\xv}{\mathbf{x}}
+\newcommand{\av}{\mathbf{a}}
+\newcommand{\dhat}{\mathbf{\hat{d}}}
+\newcommand{\R}{\mathbf{R}}
+\newcommand{\grad}{\nabla}
+\newcommand{\dive}{\nabla\!\cdot}
+\newcommand{\Qcal}{\mathcal{Q}}
+\newcommand{\Pcal}{\mathcal{P}}
+\newcommand{\id}{\mathrm{id}}
+
+\begin{document}
+
+\begin{frame}
+    \titlepage
+\end{frame}
+
+% =====================================================================
+%  RECAP
+% =====================================================================
+\begin{frame}{Recap — Fokker--Planck Formulation}
+
+Let $\mu,\nu\in\mathcal{P}(\mathbb{R}^d)$ be the initial and terminal marginals,
+time rescaled to $[0,1]$, $\gamma>0$ the diffusion coefficient.
+
+We seek a density--velocity pair $(\rho_t,\bt_t)_{t\in[0,1]}$ with
+$\rho_0=\mu$, $\rho_1=\nu$ such that
+\begin{itemize}
+    \item $\rho_t$ solves the \textbf{Fokker--Planck equation}
+    \[
+        \partial_t \rho_t + \dive(\rho_t\,\bt_t) = \gamma\,\Delta \rho_t ,
+    \]
+    \item the pair minimizes the \textbf{expected kinetic energy}
+    \[
+        \mathcal{J}(\rho,\bt)=\int_0^1\!\!\int_{\mathbb{R}^d}\tfrac12|\bt_t(\xv)|^2\,\rho_t(\xv)\,d\xv\,dt .
+    \]
+\end{itemize}
+
+Girsanov applied to $dX_t=\bt_t(X_t)\,dt+\sqrt{2\gamma}\,dW_t$ gives
+$\mathrm{KL}(\mathbb{P}\,\|\,\mathbb{R})=\mathcal{J}/(2\gamma)$: the Schrödinger
+bridge is the minimal-energy stochastic interpolation between $\mu$ and $\nu$.
+
+\end{frame}
+
+\begin{frame}{Recap — Heat and Advection--Diffusion Semigroups}
+
+Hopf--Cole ($\eta=e^{f}$, $\eta^\ast=e^{g}$) linearizes the optimality system into
+two transport--diffusion PDEs, whose transition operators are the SB kernel.
+
+\begin{block}{Driftless bridge ($\bt\equiv0$) — heat semigroup $\Pcal_\tau=e^{\tau\gamma\Delta}$}
+\[
+    \partial_\tau\phi=\gamma\,\Delta\phi,\qquad \partial_n\phi|_{\partial\Omega}=0
+    \quad(\text{Neumann, no-flux}).
+\]
+\end{block}
+
+\begin{block}{Drifted bridge — advection--diffusion semigroups $\Qcal_\tau=e^{\tau\mathcal{L}}$, $\Qcal^{\dagger}_\tau=e^{\tau\mathcal{L}^\ast}$}
+\[
+    \underbrace{\partial_\tau\phi=\bt\cdot\grad\phi+\gamma\Delta\phi}_{\Qcal:\ \text{non-conservative, backward}},
+    \qquad
+    \underbrace{\partial_\tau\phi=-\dive(\bt\phi)+\gamma\Delta\phi}_{\Qcal^{\dagger}:\ \text{conservative, forward}} .
+\]
+\end{block}
+
+IPFP in log-potential form:
+\[
+    f^{(k+1)}=\log\mu-\log\Qcal_1\!\bigl[e^{g^{(k)}}\bigr],
+    \qquad
+    g^{(k+1)}=\log\nu-\log\Qcal^{\dagger}_1\!\bigl[e^{f^{(k+1)}}\bigr].
+\]
+FVM: TPFA diffusion $+$ first-order upwind advection, SSP-RK2, Anderson-accelerated.
+$\bt\equiv0\Rightarrow\Qcal_1=\Qcal^{\dagger}_1=\Pcal_1$.
+
+\end{frame}
+
+\begin{frame}{Recap — Convex Displacement Interpolation (CDI)}
+
+The maps act on the shock-feature marginals; the physical Mach field is recovered
+gradient-free. For $t\in(0,1)$,
+\[
+    \boxed{\;
+    \widehat M(t,\xv)=(1-t)\,M_0\!\bigl((1-t)\,\xv+t\,S(\xv)\bigr)
+                     +t\,M_1\!\bigl(t\,\xv+(1-t)\,T(\xv)\bigr)
+    \;}
+\]
+
+\begin{itemize}
+    \item $M_0,M_1$ = endpoint Mach fields, sampled at the displaced pre-images by
+    linear interpolation on the mesh;
+    \item exact at the endpoints: $\widehat M(0,\cdot)=M_0$, $\widehat M(1,\cdot)=M_1$;
+    \item no map inversion — forward pre-image $t\xv+(1-t)T$ pulls back $M_1$,
+    backward pre-image $(1-t)\xv+tS$ pulls back $M_0$, blended with weights $(1-t,t)$.
+\end{itemize}
+
+The reference drift is designed to keep $T,S$ close to the identity, so the CDI
+reconstruction stays well-conditioned at small $\gamma$.
+
+\end{frame}
+
+\begin{frame}{Recap — Construction of the Transport Maps $T,S$}
+
+$T$ is the conditional mean of the target position given the source (built from
+$g$ through $\Qcal_1$); $S$ is its backward analogue (from $f$ through $\Qcal^{\dagger}_1$):
+\[
+    T(\xv)=\frac{\Qcal_1[\,\id\,e^{g}\,](\xv)}{\Qcal_1[e^{g}](\xv)}-\boldsymbol{\beta}_{\mathrm{bias}}(\xv),
+    \qquad
+    S(\xv)=\frac{\Qcal^{\dagger}_1[\,\id\,e^{f}\,](\xv)}{\Qcal^{\dagger}_1[e^{f}](\xv)}-\boldsymbol{\beta}_{\mathrm{bias}}(\xv).
+\]
+
+\begin{block}{Neumann identity-leak correction}
+\[
+    \boldsymbol{\beta}_{\mathrm{bias}}=\frac{\Qcal_1[\id]}{\Qcal_1[1]}-\Phi_{\bt},
+\]
+measured against the drift's own \emph{reflected deterministic flow} $\Phi_{\bt}$
+(identity when $\bt\equiv0$), so $\bt$'s transport stays in $T,S$.
+\end{block}
+
+Evaluated in the stable log-domain with a positivity shift $\id\mapsto\id-c$; a
+trust gate reverts kernel-collapse outlier cells to the identity. $T,S\to\id$ far
+from the transported feature.
+
+\end{frame}
+
+% =====================================================================
+%  OBLIQUE DRIFT — ANALYTIC
+% =====================================================================
+\begin{frame}{Oblique Drift (1/2) — Wave Angles}
+
+The LE and TE shocks rotate between their $M_0$ and $M_1$ wave angles:
+
+\begin{block}{$\theta$--$\beta$--$M$ relation (weak root) — LE family}
+\[
+    \tan\theta = 2\cot\beta_s\,\frac{M^2\sin^2\beta_s - 1}{M^2(\gamma_g+\cos2\beta_s)+2},
+    \qquad
+    \beta_s^{\mathrm{LE}}(M) = \beta_s(\alpha, M).
+\]
+\end{block}
+
+\begin{block}{TE family — LE shock $\to$ Prandtl--Meyer($2\alpha$) $\to$ TE shock}
+\[
+    \nu(M_b) = \nu(M_a) + 2\alpha,
+    \qquad
+    \beta_s^{\mathrm{TE}}(M) = \beta_s(\alpha, M_b(M)).
+\]
+\end{block}
+
+\begin{block}{Ray angles and rotation rates,\; $M(t)=(1-t)M_0+tM_1$}
+\[
+    \psi_{\mathrm{LE}} = \beta_s^{\mathrm{LE}}, \qquad
+    \psi_{\mathrm{TE}} = \beta_s^{\mathrm{TE}}-\alpha, \qquad
+    \omega_\kappa(t) = \tfrac{d\beta_s^{\kappa}}{dM}\big|_{M(t)}\,(M_1-M_0).
+\]
+\end{block}
+
+\end{frame}
+
+\begin{frame}{Oblique Drift (2/2) — Windowed Rigid Rotation}
+
+\begin{block}{Four windowed rigid rotations about the apexes $\av_\kappa$}
+\[
+    \boxed{\;
+    \bt(t,\xv) = \sum_{\kappa\in\{\mathrm{LE},\mathrm{TE}\}}\sum_{\sigma=\pm1}
+        \sigma\,\omega_\kappa(t)\,w_{\kappa,\sigma}(t,\xv)\,\R\,(\xv-\av_\kappa),
+    \qquad
+    \R = \bigl(\begin{smallmatrix}0&-1\\1&0\end{smallmatrix}\bigr)
+    \;}
+\]
+\[
+    w_{\kappa,\sigma} = e^{-\mathrm{dist}_{\kappa,\sigma}^2/\sigma_w(s)^2}\,
+        \mathbf{1}[s_{\kappa,\sigma}>0],
+    \qquad
+    s_{\kappa,\sigma} = (\xv-\av_\kappa)\cdot\dhat_{\kappa,\sigma}.
+\]
+\end{block}
+
+Zero in the freestream; the conical band $\sigma_w(s)$ covers the swept wedge;
+$\dive\bt\neq0$ $\Rightarrow$ enters through the conservative $\Qcal^{\dagger}$.
+
+\end{frame}
+
+\begin{frame}{Oblique Drift — Field}
+
+\begin{columns}
+\begin{column}{0.5\textwidth}
+\centering
+\includegraphics[width=\linewidth, height=0.72\textheight, keepaspectratio]%
+    {drift_beta_quiver.png}\\[-0.2em]
+{\scriptsize Analytic $\boldsymbol{\beta}(t{=}0.5)$}
+\end{column}
+\begin{column}{0.5\textwidth}
+\centering
+\includegraphics[width=\linewidth, height=0.72\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/eig/drift_oblique/gmin0.0001/SB_Mach_drift_drift_field.png}\\[-0.2em]
+{\scriptsize Total drift $\bt_t=\boldsymbol{\beta}+2\gamma\grad g_t$}
+\end{column}
+\end{columns}
+
+\end{frame}
+
+% =====================================================================
+%  OBLIQUE RESULTS — LOWER (NON-REFINED) MESH  h0.025
+% =====================================================================
+\begin{frame}{Oblique Drift — Interpolation vs.\ HR Reference (\texttt{eig}, $h=0.025$)}
+
+\begin{columns}
+\begin{column}{0.33\textwidth}
+\centering
+\includegraphics[width=\linewidth, height=0.36\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/eig/drift_oblique/gmin0.0001/Mach_BaryCDI_t0.20.png}\\[-0.1em]
+{\scriptsize SB-CDI, $t=0.20$}\\[0.3em]
+\includegraphics[width=\linewidth, height=0.36\textheight, keepaspectratio]%
+    {../figures/diamond/h0.025/M_AOA0.00_M2.10_HLLC_MUSCL_SRK2_t4.00.png}\\[-0.1em]
+{\scriptsize HR ref., $M=2.10$}
+\end{column}
+\begin{column}{0.33\textwidth}
+\centering
+\includegraphics[width=\linewidth, height=0.36\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/eig/drift_oblique/gmin0.0001/Mach_BaryCDI_t0.50.png}\\[-0.1em]
+{\scriptsize SB-CDI, $t=0.50$}\\[0.3em]
+\includegraphics[width=\linewidth, height=0.36\textheight, keepaspectratio]%
+    {../figures/diamond/h0.025/M_AOA0.00_M2.25_HLLC_MUSCL_SRK2_t4.00.png}\\[-0.1em]
+{\scriptsize HR ref., $M=2.25$}
+\end{column}
+\begin{column}{0.33\textwidth}
+\centering
+\includegraphics[width=\linewidth, height=0.36\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/eig/drift_oblique/gmin0.0001/Mach_BaryCDI_t0.80.png}\\[-0.1em]
+{\scriptsize SB-CDI, $t=0.80$}\\[0.3em]
+\includegraphics[width=\linewidth, height=0.36\textheight, keepaspectratio]%
+    {../figures/diamond/h0.025/M_AOA0.00_M2.40_HLLC_MUSCL_SRK2_t4.00.png}\\[-0.1em]
+{\scriptsize HR ref., $M=2.40$}
+\end{column}
+\end{columns}
+
+\end{frame}
+
+\begin{frame}{Oblique Drift — Absolute Error, $\gamma_{\min}=0.5$}
+\centering
+\includegraphics[width=0.92\linewidth, height=0.78\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/eig/drift_oblique/gmin0.5/AbsErr_BaryCDI_abs_error.png}
+\end{frame}
+
+\begin{frame}{Oblique Drift — Absolute Error, $\gamma_{\min}=0.05$}
+\centering
+\includegraphics[width=0.92\linewidth, height=0.78\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/eig/drift_oblique/gmin0.05/AbsErr_BaryCDI_abs_error.png}
+\end{frame}
+
+\begin{frame}{Oblique Drift — Absolute Error, $\gamma_{\min}=0.005$}
+\centering
+\includegraphics[width=0.92\linewidth, height=0.78\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/eig/drift_oblique/gmin0.005/AbsErr_BaryCDI_abs_error.png}
+\end{frame}
+
+\begin{frame}{Oblique Drift — Absolute Error, $\gamma_{\min}=5\times10^{-4}$}
+\centering
+\includegraphics[width=0.92\linewidth, height=0.78\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/eig/drift_oblique/gmin0.0005/AbsErr_BaryCDI_abs_error.png}
+\end{frame}
+
+\begin{frame}{Oblique Drift — Absolute Error, $\gamma_{\min}=10^{-4}$}
+\centering
+\includegraphics[width=0.92\linewidth, height=0.78\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/eig/drift_oblique/gmin0.0001/AbsErr_BaryCDI_abs_error.png}
+\end{frame}
+
+\begin{frame}{Oblique Drift — Absolute Error, $\gamma_{\min}=10^{-5}$}
+\centering
+\includegraphics[width=0.92\linewidth, height=0.78\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/eig/drift_oblique/gmin1e-05/AbsErr_BaryCDI_abs_error.png}
+\end{frame}
+
+% =====================================================================
+%  FFD DRIFT
+% =====================================================================
+\begin{frame}
+  \frametitle{Free-Form Deformation (FFD)}
+  \begin{columns}
+    \begin{column}{0.5\textwidth}
+      \begin{align*}
+        T: \mathbb{R}^{N_{cp}} \times \mathbb{R}^3 &\longrightarrow
+        \mathbb{R}^3 \\
+        \lambda, \xi &\longmapsto T_{\lambda_0}(\xi) = x
+      \end{align*}
+      In the coordinate system $\mathbf{e_1}$, $\mathbf{e_2}$, $\mathbf{e_3}$
+
+      $\mathbf{x} = \mathbf{x_0} + t_1 \mathbf{e_1} + t_2
+      \mathbf{e_2} + t_3 \mathbf{e_3}$
+
+      The mapping is defined as:
+      \begin{equation}
+        FFD(t_1,t_2,t_3) = \sum_{i=0}^{l} \sum_{j=0}^{m} \sum_{k=0}^{n}
+        B_{i}^{l}(t_1) B_{j}^{m}(t_2) B_{k}^{n}(t_3) P_{i,j,k}
+      \end{equation}
+
+      Here, $P_{i,j,k}$ are the control points in the deformed lattice,
+      and $l, m, n$ denote the degree of the polynomial in each direction.
+
+    \end{column}
+    % \begin{column}{0.3\textwidth}
+    %   In the coordinates system $\mathbf{e_1}$, $\mathbf{e_2}$, $\mathbf{e_3}$
+
+    %   $\mathbf{x} = \mathbf{x_0} + t_1 \mathbf{e_1} + t_2
+    % \mathbf{e_2} + t_3 \mathbf{e_3}$
+    % \end{column}
+    \begin{column}{0.5\textwidth}
+      {\small
+        The $(t_1, t_2, t_3)$ coordinates can be calculated using:
+
+        \begin{align}
+          t_1 &= \frac{(\mathbf{e_2} \times \mathbf{e_3}) \cdot (X -
+          X_0)}{(\mathbf{e_2} \times \mathbf{e_3}) \cdot \mathbf{e_1}} \\
+          t_2 &= \frac{(\mathbf{e_1} \times \mathbf{e_3}) \cdot (X -
+          X_0)}{(\mathbf{e_1} \times \mathbf{e_3}) \cdot \mathbf{e_2}} \\
+          t_3 &= \frac{(\mathbf{e_1} \times \mathbf{e_2}) \cdot (X -
+          X_0)}{(\mathbf{e_1} \times \mathbf{e_2}) \cdot \mathbf{e_3}}
+        \end{align}
+
+        Where a Bernstein polynomial is defined as:
+
+        \begin{equation}
+          B_{i}^{l}(t) = \binom{l}{i}t^{i}(1-t)^{l-i}
+        \end{equation}
+      }
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Data-Driven Drift — FFD Registration}
+
+Register the two shock-feature marginals $u_0,u_1$ by two FFD maps $T$ (forward)
+and $W$ (backward), whose control-point displacements $\Delta P^{T},\Delta P^{W}$
+are the free DOF (single region, all control points free, no boundary conditions).
+
+\begin{block}{Objective (single region), weights $(\alpha_A,\alpha_B,\alpha_C,\alpha_D,\alpha_G)=(1,\,0.1,\,1,\,10^{-2},\,0.1)$}
+{\small
+\begin{align*}
+J=\;&\alpha_A\bigl(\|u_1\!\circ T-u_0\|^2+\|u_0\!\circ W-u_1\|^2\bigr)\\
+ +\;&\alpha_B\bigl(\|W\!\circ T-\id\|^2+\|T\!\circ W-\id\|^2\bigr)\\
+ +\;&\alpha_C\bigl(\|b_\varepsilon(\det\grad T)\|^2+\|b_\varepsilon(\det\grad W)\|^2\bigr)
+    +\tfrac{\alpha_D}{N_{cp}}\bigl(\|\Delta P^{T}\|^2+\|\Delta P^{W}\|^2\bigr)\\
+ +\;&\alpha_G\bigl(\mathcal{W}_2^2(u_1\!\circ T,u_0)+\mathcal{W}_2^2(u_0\!\circ W,u_1)\bigr)
+\end{align*}}
+\end{block}
+
+{\footnotesize
+$\alpha_A$ alignment (both directions)\; · \;$\alpha_B$ bijectivity / map-sync \;
+· \;$\alpha_C$ Jacobian log-barrier (positivity) \; · \;$\alpha_D$ control-point reg.\ \;
+· \;$\alpha_G$ $\mathcal{W}_2$ capture.\par
+$T,W$ analytic (Bernstein) $\Rightarrow$ evaluated \emph{exactly} at the true cell
+centres — no grid$\to$mesh interpolation error.}
+
+\end{frame}
+
+\begin{frame}{From FFD Mappings to the Reference Drift $\boldsymbol{\beta}$}
+
+The alignment term drives $u_1(T(\xv))=u_0(\xv)$: at a field-0 feature $p_0$,
+$T(p_0)=p_1$ (its field-1 position). Evaluating the converged Bernstein maps at the
+true cell centres and taking the frozen unit-scale ($s{=}1$) displacements,
+
+\[
+    \boxed{\;\boldsymbol{\beta}(\xv)=T(\xv,s{=}1)-\xv\;}
+    \qquad
+    \boldsymbol{\alpha}(\xv)=W(\xv,s{=}1)-\xv
+\]
+\[
+    \text{forward } (\mu_0\!\to\!\mu_1)\ \text{via }\boldsymbol{\beta};
+    \qquad
+    \text{backward } (W\approx T^{-1})\ \text{via }\boldsymbol{\alpha}.
+\]
+
+\begin{itemize}
+    \item $\boldsymbol{\beta}$ is a frozen $(N,2)$ field, consumed by the SB kernel
+    $\Qcal/\Qcal^{\dagger}$, $\Phi_{\bt}$-referenced bias, trust gate and CDI
+    \emph{exactly} like the oblique drift;
+    \item $\boldsymbol{\beta}$ is cached per marginal pair
+    (\texttt{ffd\_beta\_$\langle$hash$\rangle$.npz}) — the registration is offline,
+    run once;
+    \item the raw maps $T=\xv+\boldsymbol{\beta}$, $S=\xv+\boldsymbol{\alpha}$ also
+    serve as a \emph{stand-alone} interpolator (FFD control).
+\end{itemize}
+
+\end{frame}
+
+\begin{frame}{FFD Reference Drift $\boldsymbol{\beta}=T(\xv)-\xv$}
+\centering
+\includegraphics[width=0.72\linewidth, height=0.80\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/eig/drift_ffd/gmin0.0001/FFD_beta_field.png}
+\end{frame}
+
+% =====================================================================
+%  FFD RESULTS — HEATMAPS, NO COMMENTS
+% =====================================================================
+\begin{frame}{FFD Drift — Absolute Error, $\gamma_{\min}=0.5$}
+\centering
+\includegraphics[width=0.92\linewidth, height=0.78\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/eig/drift_ffd/gmin0.5/AbsErr_BaryCDI_abs_error.png}
+\end{frame}
+
+\begin{frame}{FFD Drift — Absolute Error, $\gamma_{\min}=0.05$}
+\centering
+\includegraphics[width=0.92\linewidth, height=0.78\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/eig/drift_ffd/gmin0.05/AbsErr_BaryCDI_abs_error.png}
+\end{frame}
+
+\begin{frame}{FFD Drift — Absolute Error, $\gamma_{\min}=0.005$}
+\centering
+\includegraphics[width=0.92\linewidth, height=0.78\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/eig/drift_ffd/gmin0.005/AbsErr_BaryCDI_abs_error.png}
+\end{frame}
+
+\begin{frame}{FFD Drift — Absolute Error, $\gamma_{\min}=5\times10^{-4}$}
+\centering
+\includegraphics[width=0.92\linewidth, height=0.78\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/eig/drift_ffd/gmin0.0005/AbsErr_BaryCDI_abs_error.png}
+\end{frame}
+
+\begin{frame}{FFD Drift — Absolute Error, $\gamma_{\min}=10^{-4}$}
+\centering
+\includegraphics[width=0.92\linewidth, height=0.78\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/eig/drift_ffd/gmin0.0001/AbsErr_BaryCDI_abs_error.png}
+\end{frame}
+
+\begin{frame}{FFD Drift — Absolute Error, $\gamma_{\min}=10^{-5}$}
+\centering
+\includegraphics[width=0.92\linewidth, height=0.78\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/eig/drift_ffd/gmin1e-05/AbsErr_BaryCDI_abs_error.png}
+\end{frame}
+
+% =====================================================================
+%  FFD REGISTRATION AS DIRECT INTERPOLATOR (control, gamma-independent)
+% =====================================================================
+\begin{frame}{FFD Registration as Interpolator vs.\ HR Reference (1/3)}
+
+\begin{columns}
+\begin{column}{0.33\textwidth}
+\centering
+\includegraphics[width=\linewidth, height=0.36\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/eig/drift_ffd/gmin0.0001/Mach_FFD_t0.10.png}\\[-0.1em]
+{\scriptsize FFD, $t=0.10$}\\[0.3em]
+\includegraphics[width=\linewidth, height=0.36\textheight, keepaspectratio]%
+    {../figures/diamond/h0.025/M_AOA0.00_M2.05_HLLC_MUSCL_SRK2_t4.00.png}\\[-0.1em]
+{\scriptsize HR ref., $M=2.05$}
+\end{column}
+\begin{column}{0.33\textwidth}
+\centering
+\includegraphics[width=\linewidth, height=0.36\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/eig/drift_ffd/gmin0.0001/Mach_FFD_t0.20.png}\\[-0.1em]
+{\scriptsize FFD, $t=0.20$}\\[0.3em]
+\includegraphics[width=\linewidth, height=0.36\textheight, keepaspectratio]%
+    {../figures/diamond/h0.025/M_AOA0.00_M2.10_HLLC_MUSCL_SRK2_t4.00.png}\\[-0.1em]
+{\scriptsize HR ref., $M=2.10$}
+\end{column}
+\begin{column}{0.33\textwidth}
+\centering
+\includegraphics[width=\linewidth, height=0.36\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/eig/drift_ffd/gmin0.0001/Mach_FFD_t0.30.png}\\[-0.1em]
+{\scriptsize FFD, $t=0.30$}\\[0.3em]
+\includegraphics[width=\linewidth, height=0.36\textheight, keepaspectratio]%
+    {../figures/diamond/h0.025/M_AOA0.00_M2.15_HLLC_MUSCL_SRK2_t4.00.png}\\[-0.1em]
+{\scriptsize HR ref., $M=2.15$}
+\end{column}
+\end{columns}
+
+\end{frame}
+
+\begin{frame}{FFD Registration as Interpolator vs.\ HR Reference (2/3)}
+
+\begin{columns}
+\begin{column}{0.33\textwidth}
+\centering
+\includegraphics[width=\linewidth, height=0.36\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/eig/drift_ffd/gmin0.0001/Mach_FFD_t0.40.png}\\[-0.1em]
+{\scriptsize FFD, $t=0.40$}\\[0.3em]
+\includegraphics[width=\linewidth, height=0.36\textheight, keepaspectratio]%
+    {../figures/diamond/h0.025/M_AOA0.00_M2.20_HLLC_MUSCL_SRK2_t4.00.png}\\[-0.1em]
+{\scriptsize HR ref., $M=2.20$}
+\end{column}
+\begin{column}{0.33\textwidth}
+\centering
+\includegraphics[width=\linewidth, height=0.36\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/eig/drift_ffd/gmin0.0001/Mach_FFD_t0.50.png}\\[-0.1em]
+{\scriptsize FFD, $t=0.50$}\\[0.3em]
+\includegraphics[width=\linewidth, height=0.36\textheight, keepaspectratio]%
+    {../figures/diamond/h0.025/M_AOA0.00_M2.25_HLLC_MUSCL_SRK2_t4.00.png}\\[-0.1em]
+{\scriptsize HR ref., $M=2.25$}
+\end{column}
+\begin{column}{0.33\textwidth}
+\centering
+\includegraphics[width=\linewidth, height=0.36\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/eig/drift_ffd/gmin0.0001/Mach_FFD_t0.60.png}\\[-0.1em]
+{\scriptsize FFD, $t=0.60$}\\[0.3em]
+\includegraphics[width=\linewidth, height=0.36\textheight, keepaspectratio]%
+    {../figures/diamond/h0.025/M_AOA0.00_M2.30_HLLC_MUSCL_SRK2_t4.00.png}\\[-0.1em]
+{\scriptsize HR ref., $M=2.30$}
+\end{column}
+\end{columns}
+
+\end{frame}
+
+\begin{frame}{FFD Registration as Interpolator vs.\ HR Reference (3/3)}
+
+\begin{columns}
+\begin{column}{0.33\textwidth}
+\centering
+\includegraphics[width=\linewidth, height=0.36\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/eig/drift_ffd/gmin0.0001/Mach_FFD_t0.70.png}\\[-0.1em]
+{\scriptsize FFD, $t=0.70$}\\[0.3em]
+\includegraphics[width=\linewidth, height=0.36\textheight, keepaspectratio]%
+    {../figures/diamond/h0.025/M_AOA0.00_M2.35_HLLC_MUSCL_SRK2_t2.74.png}\\[-0.1em]
+{\scriptsize HR ref., $M=2.35$}
+\end{column}
+\begin{column}{0.33\textwidth}
+\centering
+\includegraphics[width=\linewidth, height=0.36\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/eig/drift_ffd/gmin0.0001/Mach_FFD_t0.80.png}\\[-0.1em]
+{\scriptsize FFD, $t=0.80$}\\[0.3em]
+\includegraphics[width=\linewidth, height=0.36\textheight, keepaspectratio]%
+    {../figures/diamond/h0.025/M_AOA0.00_M2.40_HLLC_MUSCL_SRK2_t4.00.png}\\[-0.1em]
+{\scriptsize HR ref., $M=2.40$}
+\end{column}
+\begin{column}{0.33\textwidth}
+\centering
+\includegraphics[width=\linewidth, height=0.36\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/eig/drift_ffd/gmin0.0001/Mach_FFD_t0.90.png}\\[-0.1em]
+{\scriptsize FFD, $t=0.90$}\\[0.3em]
+\includegraphics[width=\linewidth, height=0.36\textheight, keepaspectratio]%
+    {../figures/diamond/h0.025/M_AOA0.00_M2.45_HLLC_MUSCL_SRK2_t4.00.png}\\[-0.1em]
+{\scriptsize HR ref., $M=2.45$}
+\end{column}
+\end{columns}
+
+\end{frame}
+
+\begin{frame}{FFD Registration as Interpolator — Absolute Error}
+\centering
+\includegraphics[width=0.92\linewidth, height=0.78\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/eig/drift_ffd/gmin0.0001/AbsErr_FFD_abs_error.png}\\[-0.2em]
+{\scriptsize $\gamma$-independent (raw registration maps $T=\xv+\boldsymbol{\beta}$, $S=\xv+\boldsymbol{\alpha}$).}
+\end{frame}
+
+% =====================================================================
+%  SWEEP ANALYSIS — FIGURES ONLY
+% =====================================================================
+\begin{frame}{Sweep — Error vs.\ $\gamma_{\min}$ (\texttt{eig})}
+\centering
+\includegraphics[width=\linewidth, height=0.80\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/_sweep/err_vs_gamma_eig.png}
+\end{frame}
+
+\begin{frame}{Sweep — Error vs.\ $t$ (\texttt{eig})}
+\centering
+\includegraphics[width=\linewidth, height=0.80\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/_sweep/err_vs_t_eig.png}
+\end{frame}
+
+\begin{frame}{Sweep — SB vs.\ FFD Registration (\texttt{eig})}
+\centering
+\includegraphics[width=\linewidth, height=0.80\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/_sweep/sb_vs_ffd_eig.png}
+\end{frame}
+
+\begin{frame}{Sweep — Gain over Linear (\texttt{eig})}
+\centering
+\includegraphics[width=0.90\linewidth, height=0.80\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/_sweep/gain_heatmap_eig.png}
+\end{frame}
+
+\begin{frame}{Sweep — Cost vs.\ Accuracy (\texttt{eig})}
+\centering
+\includegraphics[width=0.72\linewidth, height=0.80\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/_sweep/cost_accuracy_eig.png}
+\end{frame}
+
+\begin{frame}{Sweep — Cost vs.\ $\gamma_{\min}$ (\texttt{eig})}
+\centering
+\includegraphics[width=\linewidth, height=0.80\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/_sweep/timing_eig.png}
+\end{frame}
+
+\begin{frame}{Sweep — IPFP Convergence (\texttt{eig})}
+\centering
+\includegraphics[width=\linewidth, height=0.80\textheight, keepaspectratio]%
+    {Mach_interpolation/diamond/iso/hessian/_sweep/convergence_eig.png}
+\end{frame}
+
+\end{document}
