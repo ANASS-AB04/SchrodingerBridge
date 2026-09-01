@@ -193,6 +193,53 @@ def _step_Qadj(phi, mesh, dt, beta_cells, gamma_diff):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Time-dependent reference drift  β(t)
+#
+#  β may be given as (N,2) — one frozen field, the original behaviour — or as a
+#  STACK (K,N,2) sampled at K uniform SB times t_k = k/(K-1).  The stack is what
+#  reference_drift="SBsquared_exact" carries.
+#
+#  THE DIRECTION TRAP.  Q and Q† march in OPPOSITE SB time:
+#
+#    Q  propagates the backward wave function η*.  Its PDE is integrated forward
+#       in solver time τ, but τ = 1 − t, so at substep i the SB time is
+#           s = t_target_start − τ = 1 − (i+½)·dt.
+#    Q† propagates the forward wave function η, where τ = t directly, so
+#           s = (i+½)·dt.
+#
+#  Indexing both the same way yields a wrong but entirely plausible answer.  The
+#  check that catches it is the adjoint identity ⟨Q[u],v⟩_A = ⟨u,Q†[v]⟩_A: Q† is
+#  built as the exact step-by-step area-weighted transpose of Q, so
+#      Q^T = S(β_{n-1})^T … S(β_0)^T
+#  and Q†'s step j must reuse the value Q's step (n-1-j) used.  With the two
+#  formulas above that is exactly β((j+½)·dt) — mirrored, and the identity holds
+#  to machine precision.  Flip either one and it breaks immediately.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _beta_at(beta, s):
+    """β at SB time ``s`` — linear interpolation over a (K,N,2) stack.
+
+    A plain (N,2) β is returned unchanged, so the constant-drift path costs
+    nothing extra.  ``s`` is a traced scalar; the gather is a dynamic index.
+    """
+    if beta.ndim == 2:
+        return beta
+    K = beta.shape[0]
+    if K == 1:
+        return beta[0]
+    x  = jnp.clip(s, 0.0, 1.0) * (K - 1)
+    k0 = jnp.clip(jnp.floor(x).astype(jnp.int32), 0, K - 2)
+    w  = x - k0.astype(beta.dtype)
+    return (1.0 - w) * beta[k0] + w * beta[k0 + 1]
+
+
+def beta_max_of(beta):
+    """max cell-wise ‖β‖ over space AND time — the advective CFL bound."""
+    b = np.asarray(beta)
+    return float(np.max(np.linalg.norm(b, axis=-1)))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Semigroup solvers  (mirror heat_solver.solve_heat_equation)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -209,8 +256,10 @@ def solve_advdiff_equation(phi_init, t_target, gamma_diff, mesh, beta_cells, n_s
     dtype    = jnp.result_type(phi_init, beta_cells, gamma_diff)
     phi_init = phi_init.astype(dtype)
 
-    def body_fn(_, phi):
-        return _step_Q(phi, mesh, dt, beta_cells, gamma_diff)
+    # Q runs BACKWARD in SB time: solver time τ maps to SB time 1 − τ.
+    def body_fn(i, phi):
+        s = 1.0 - (i + 0.5) * dt
+        return _step_Q(phi, mesh, dt, _beta_at(beta_cells, s), gamma_diff)
 
     return jax.lax.fori_loop(0, n_steps, body_fn, phi_init)
 
@@ -225,7 +274,10 @@ def solve_advdiff_equation_adjoint(phi_init, t_target, gamma_diff, mesh, beta_ce
     dtype    = jnp.result_type(phi_init, beta_cells, gamma_diff)
     phi_init = phi_init.astype(dtype)
 
-    def body_fn(_, phi):
-        return _step_Qadj(phi, mesh, dt, beta_cells, gamma_diff)
+    # Q† runs FORWARD in SB time: τ = t.  Mirrored against Q so that Q† stays the
+    # exact step-by-step transpose of Q (see the DIRECTION TRAP note above).
+    def body_fn(i, phi):
+        s = (i + 0.5) * dt
+        return _step_Qadj(phi, mesh, dt, _beta_at(beta_cells, s), gamma_diff)
 
     return jax.lax.fori_loop(0, n_steps, body_fn, phi_init)

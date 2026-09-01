@@ -95,6 +95,38 @@ small γ (see "Reference drift" under Architecture):
   `mach0_inlet`/`mach1_inlet`).
 - `"ffd"` — data-driven drift from FFD registration of the two marginals via `phdtruel`.
   Anneal down to **1e-4**. β is cached to the output dir (`ffd_beta_<hash>.npz`).
+- `"SBsquared"` — **bootstrapped / self-conditioned** drift: no external β at all. Stage 0
+  of the γ-anneal is a pure-heat bridge; every later stage takes its reference drift from
+  the *previous* stage's own SB solution, `β_{k+1} = b^(k) = β^(k) + 2γ_k ∇g_t`
+  (`retrieve_b_2d_drift` returns that total drift directly), frozen at t=0.5 like
+  `"oblique"`. **Requires ≥2 entries in `gamma_sb_schedule`** — with one stage it
+  degenerates to `"null"` and logs a `[WARN]`. The true SB solution is a fixed point of
+  this map (β optimal ⇒ ∇g→0 ⇒ β'=β), so `drift.beta_delta_history` in `metrics.json`
+  decaying down the ladder is the signature that it is converging.
+  `drift_bootstrap_smooth` (default true) heat-smooths the recovered β each stage, because
+  it comes from `compute_scalar_gradient_LSQ` — the same LSQ noise the barycentric CDI was
+  built gradient-free to avoid, which would otherwise compound over a dozen stages.
+- `"SBsquared_exact"` — the same bootstrap carrying the full time-dependent β(t) through
+  the kernel (a `(K,N,2)` stack at `drift_bootstrap_nt` uniform SB times). `Q` indexes it
+  BACKWARD in SB time (1−τ) and `Q†` FORWARD (τ); the mirroring keeps ⟨Qu,v⟩=⟨u,Q†v⟩
+  exact (verified 7e-15; an un-mirrored control fails by 183%).
+
+**Bootstrap seeding** (`drift_bootstrap_seed` = `"null"|"ffd"|"oblique"`, with
+`drift_bootstrap_start_gamma`): seeds β from the FFD registration (or the analytic
+drift) and holds it FIXED until the next stage's γ drops strictly below the switch —
+those stages are literally a `drift_ffd` run — then the bootstrap refines from there.
+This targets the measured mid-ladder failure of the heat-seeded bootstrap (worst drift
+from γ=5e-2 to 2e-3, worse than Linear at 2e-2, because stage 0 recovers a huge
+void-dominated 2γ∇g from the heat bridge). Switch `inf` = bootstrap from the start
+(original behaviour), `0` = never engage (a seeded run is then exactly `drift_ffd` —
+the degeneracy check). Seeded runs write to `drift_<mode>+<seed>/` so they never
+collide with unseeded ones. In sweep sbatch scripts, composite `DRIFTS` entries like
+`SBsquared_exact+ffd` split into (reference_drift, seed) automatically, with the
+switch from `BOOT_SWITCH` (default 1e-3).
+
+`ffd_control` (default true) runs the FFD registration even when it is not driving the
+kernel, purely to populate the γ-independent `FFD` control interpolator — so `SBsquared`
+and `oblique` runs stay three-way comparable (BaryCDI vs Linear vs FFD) with `ffd` runs.
 
 ### Linting & Type Checking
 ```bash
@@ -118,6 +150,55 @@ config per case with `sed`, overriding only `reference_drift` and `gamma_sb_sche
 
 The script does `module purge` + `export LD_LIBRARY_PATH=""` (no system CUDA module) — see
 the CUDA note under Environment.
+
+**Full Mach × AoA survey** (`run_euler_grid_big.sbatch` → `run_sb_grid_big.sbatch`):
+sweeps every 0.10-wide Mach band from 0.80 to 3.00 plus four AoA bands, for every drift.
+
+```bash
+sbatch run_euler_grid_big.sbatch                     # 481 HR solves, 8/task => 61 tasks
+sbatch run_sb_grid_big.sbatch                        # 576 runs, 12/task => 48 tasks
+CASE=bump sbatch --array=0-27 run_euler_grid_big.sbatch   # 221 solves => 28 tasks
+CASE=bump sbatch --array=0-16 run_sb_grid_big.sbatch      # 198 runs   => 17 tasks
+```
+
+Both scripts take `CASE=diamond|bump`. The **bump differs in three ways**, all handled
+by the case defaults rather than by separate scripts:
+- **No incidence axis.** The bump sits on a channel wall, so AoA is meaningless;
+  `Euler/config.py:format_condition_tag` reflects this by omitting the AoA from bump
+  snapshot names (`M2.00_…` vs diamond's `AOA0.00_M2.00_…`). `find_bundle` and
+  `_bundle_mach` are case-aware for exactly this reason — before the fix,
+  `_bundle_mach`'s `_M(...)` anchor missed every bump name and returned 0.0, which
+  would have collapsed all 22 bump Mach pairs into one `M0.00-0.00` directory.
+- **No `oblique` drift.** It is the analytic θ-β-M wedge solution; there is no wedge.
+  The default drift set drops to `null ffd SBsquared_exact+ffd`.
+- **No geometry guard.** The α=5° assertion is diamond-specific.
+
+The runs land under `outputs/Mach_interpolation/bump/…`, and since the case is part of
+the analysis root path the two cases never pool:
+
+```bash
+uv run python SB/sweep_analysis.py --root outputs/Mach_interpolation/bump/iso/hessian
+```
+
+**Chunking.** Both scripts pack several runs per array task (`CHUNK`, default 8 for
+Euler and 12 for SB). This is not only for startup amortisation: the cluster enforces
+`QOSMaxSubmitJobPerUserLimit`, and a 576-task array trips it outright. That is a
+submit-COUNT cap, unrelated to the 1–2 day walltime cap.
+
+The Euler script **chunks** (`CHUNK=8`): a solve is ~25 s at h0.025 but `uv run` +
+JAX import + XLA compile is ~40 s, so one task per solve would spend most of the
+allocation on startup. A 0.10-wide pair needs its 9 interior references, hence the
+0.01 Mach spacing — 221 Mach values per AoA.
+
+Two **physics limits** are enforced rather than discovered at runtime:
+- `oblique` has no attached-shock solution below the detachment Mach (~1.25 for the
+  5° half-wedge — `beta_le` *raises* at M≤1.20). Those 5 pairs × 2 AoA × 3 γ = 30
+  tasks skip in seconds, guarded by calling `beta_le` itself so the check follows
+  the geometry.
+- Below M=1 there is **no shock at all**, and from 1.0 to ~1.25 it is a detached bow
+  shock. The Hessian marginal, the drift and the whole transport premise are built
+  for attached oblique shocks, so the two lower bands are exploratory — the analysis
+  figure `err_vs_mach_*.png` shades them red/orange against the validated green band.
 
 **Parameter sweep**: `sbatch run_sb_sweep.sbatch` runs the full γ_min × drift × hessian_mode
 study (12 γ from 0.5→1e-4 × {null, oblique, ffd} × {eig, det} = 72 combos) as a SLURM
@@ -189,6 +270,9 @@ SB/
 ├── advdiff_solver.py— FVM advection–diffusion semigroups Q / Q† (the drifted SB kernel)
 ├── drift.py         — Reference drift β: analytic "oblique" builder, flow_map, make_inside_body
 ├── ffd_drift.py     — Data-driven "ffd" drift: FFD registration of the marginals via phdtruel
+│                     (also the γ-independent FFD control interpolator, see ffd_control)
+│   note: the "SBsquared" bootstrapped drift lives in the annealing loop of utils.py,
+│         not here — it has no builder, it recycles the bridge's own retrieve_b_2d*
 ├── plot.py          — SB plots (density transport, drift field/sequence, entropy, L2/L∞ error)
 └── testcases.py     — 1D/2D synthetic test cases (Gaussian, OU, bimodal)
 ```
@@ -234,6 +318,20 @@ outputs/                              ← SB interpolation outputs (set via run.
     ├── iso/hessian/{det,eig}/        ← density_mode = "iso_hessian" (Alauzet–Loseille metric)
     └── isocurve/                     ← density_mode = "isocurve"
         └── …/drift_<mode>/gmin<γ>/   ← final split: drift_null|oblique|ffd × smallest annealed γ
+```
+
+**Interpolation-pair levels.** Once more than one Mach pair or AoA pair is studied,
+the pair itself becomes a directory level — otherwise every pair writes to the same
+path. Both levels are **empty for the original pairs**, so the 576 finished runs keep
+their exact paths:
+
+```
+Mach 2.00→2.50 @ AoA 0  →  …/eig/h0.025/drift_ffd/gmin1e-04/            (legacy, unchanged)
+Mach 2.00→2.50 @ AoA 2  →  …/eig/h0.025/aoa2.00/drift_ffd/…             (legacy, unchanged)
+Mach 0.80→0.90 @ AoA 0  →  …/eig/h0.025/M0.80-0.90/drift_ffd/…          (new range level)
+Mach 0.80→0.90 @ AoA 2  →  …/eig/h0.025/aoa2.00/M0.80-0.90/drift_ffd/…
+AoA  0→4       @ M2.00  →  AoA_interpolation/…/h0.025/M2.00/drift_ffd/… (legacy, unchanged)
+AoA  0→1       @ M2.00  →  AoA_interpolation/…/h0.025/M2.00/A0.00-1.00/…
 ```
 
 `density_mode = "iso_hessian"` has two sub-modes (`hessian_mode`): `"det"` (node density

@@ -36,11 +36,93 @@ gamma_sb   = 0.005
 gamma_sb_schedule = [0.02, 0.01, 0.005]
 
 # Reference drift β(t,x) conditioning the bridge (referrence_drift.tex).
-#   "null"    — β≡0, pure-heat bridge (default; identical to previous behaviour)
-#   "oblique" — analytic θ-β-M diamond drift (windowed rigid shock rotations)
-#   "ffd" 
-# When "oblique", the IPFP kernel becomes the advection-diffusion semigroup Q/Q†.
+#   "null"      — β≡0, pure-heat bridge (default; identical to previous behaviour)
+#   "oblique"   — analytic θ-β-M diamond drift (windowed rigid shock rotations)
+#   "ffd"       — data-driven drift from FFD registration of the two marginals
+#   "SBsquared" — BOOTSTRAPPED / self-conditioned drift.  β is not supplied from
+#                 outside at all: stage 0 of the γ-anneal is a pure-heat bridge,
+#                 and each later stage takes β from the PREVIOUS stage's own SB
+#                 solution, β_{k+1} = b^(k) = β^(k) + 2γ_k ∇g_t  (frozen at t=0.5,
+#                 the same collapse "oblique" uses).  The true SB solution is a
+#                 fixed point of this map (β optimal ⇒ ∇g→0 ⇒ β'=β), so watch
+#                 drift.beta_delta_history in metrics.json: decay down the ladder
+#                 means it is converging.  REQUIRES ≥2 entries in
+#                 gamma_sb_schedule — with one stage it degenerates to "null".
+#   "SBsquared_exact" — the same bootstrap, but carrying the FULL time-dependent
+#                 β(t) through the kernel instead of collapsing it to t=0.5.  Each
+#                 stage recovers b_t at drift_bootstrap_nt uniform times.  Q walks
+#                 that stack BACKWARD in SB time and Q† FORWARD; the mirroring is
+#                 what keeps ⟨Qu,v⟩_A = ⟨u,Q†v⟩_A exact (verified to 7e-15, and a
+#                 deliberately un-mirrored version fails it by 183%).
+# For every mode except "null", the IPFP kernel becomes the advection-diffusion
+# semigroup Q/Q†.
 reference_drift = "ffd"
+
+# "SBsquared" only: heat-smooth the recovered drift before feeding it to the next
+# stage.  The drift comes from compute_scalar_gradient_LSQ(g_t), and that
+# cell-to-cell gradient noise is exactly why the barycentric CDI was built
+# gradient-free — over a dozen stages it would compound.  Uses smooth_gamma /
+# smooth_t below (σ = √(2γt) ≈ 0.014).  Set false to A/B the noise question.
+drift_bootstrap_smooth = true
+
+# "SBsquared_exact" only: number of uniform SB times at which b_t is sampled to
+# build the beta(t) stack the kernel carries.  Each costs one extra semigroup
+# solve per annealing stage (~3% overhead beside the IPFP itself).  Defaults to
+# n_frames.  Q indexes this stack BACKWARD in SB time and Qdagger FORWARD — see
+# the DIRECTION TRAP note in advdiff_solver.py.
+drift_bootstrap_nt = 11
+
+# Bootstrap SEEDING (both SBsquared modes).  "null" = original behaviour: stage 0
+# is a pure-heat bridge whose recovered drift (2γ∇g at γ≈0.2) is huge and
+# void-dominated — the measured cause of the mid-ladder failure (worst drift from
+# 5e-2 to 2e-3, worse than Linear at 2e-2).  "ffd" seeds β from the registration
+# (reusing the control's, no second registration); "oblique" from the analytic
+# θ-β-M drift.  drift_bootstrap_start_gamma holds the seed FIXED until the next
+# stage's γ drops strictly below it: inf = bootstrap from the very start
+# (original), 1e-3 = the data-recommended switch (ffd-drift is at or near best
+# down to 1e-3; the bootstrap only wins below 5e-4), 0.0 = never engage (a seeded
+# run is then exactly a drift_ffd run — the degeneracy check).
+drift_bootstrap_seed        = "null"
+drift_bootstrap_start_gamma = inf
+
+# "SBsquared_exact" only: sample the β(t) stack on [clip, 1-clip] instead of
+# [0, 1].  b_t = 2γ∇g_t with g_t = log Q_{1-t}[e^g], so at t=1 the semigroup is
+# the IDENTITY and g_t is the RAW log-potential — its gradient across the
+# void/ridge boundary is enormous on a log scale.  Measured on a synthetic
+# void+ridge potential:  t=0.5 → |b|=1.79, t=0.9 → 3.70, t=1.0 → 13.76.
+# |β|_max sets the advective CFL and Péclet for the WHOLE kernel, so that one
+# slice poisons every stage (a heat-seeded exact run hit |β|=12.96 vs the frozen
+# mode's 2.4).  The kernel interpolates the stack by index, so clipping clamps
+# the end slices to the nearest interior value.  Measured A/B (exact+ffd seed,
+# 3-stage smoke): clip 0.0 -> |b|=2.76, L2=3.86e-3;  0.1 -> 1.11, 3.28e-3;
+# 0.2 -> 0.93, 2.96e-3.  Monotone in both, so 0.2 is the default.
+drift_bootstrap_t_clip = 0.2
+
+# "SBsquared*" only: zero the recovered drift where the marginals carry no mass.
+# b = 2γ∇g_t is a LOG-potential gradient, so outside the shock cone — where the
+# density sits at its background floor and the IPFP leaves g unconstrained — it is
+# pure amplified noise, and the bootstrap re-amplifies it every stage.  Measured
+# without the mask (h0.025, γ=1e-4): |β|_max = 2.55 in two lobes in the VOID
+# against a true shock displacement of 0.0074, bias_T_max 0.495 (vs FFD 0.042),
+# Pe 1179 (vs 204), and a visibly smeared reconstruction.  Heat-smoothing does
+# NOT fix it — the artefact is large-scale, not high-frequency.
+# w = ρ/(ρ + ρ_ref), ρ = max(μ0,μ1), ρ_ref = the mask_pct-th percentile of ρ.
+# Persist the reconstructed Mach/pressure fields to fields.npz alongside
+# metrics.json.  Without it a finished run keeps only per-frame PNGs, so
+# animations, side-by-side comparison on a shared colour scale, and shock-locus
+# overlays have nothing to re-read.  float32; ~2.7 MB at h0.025, ~10.7 MB at
+# h0.0125.  Set false if disk is tight.
+save_fields = true
+
+drift_bootstrap_mask     = true
+drift_bootstrap_mask_pct = 50.0
+
+# Run the FFD registration even when it is NOT driving the kernel, purely to
+# populate the γ-independent "FFD" control interpolator in the error tables.
+# Keeps SBsquared/oblique runs three-way comparable (BaryCDI vs Linear vs FFD)
+# with the drift_ffd runs.  Ignored when reference_drift = "ffd" (always on) or
+# "null".  Costs one registration: mesh-independent, 144² grid, 800 Adam iters.
+ffd_control = true
 
 drift_sigma_w   = 0.2        # Gaussian shock-band half-width (localization length)
 drift_gamma_gas = 1.4        # ratio of specific heats for the θ-β-M relation

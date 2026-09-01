@@ -9,3 +9,21 @@ results_bkp/
 results/
 figures/
 dataset/
+# ── Heavy run artefacts ──────────────────────────────────────────────────
+# outputs/ is ~27 GB: 20.7 GB of PNG frames and 4.9 GB of .npz fields, every
+# one of which SB/main.py regenerates from the Euler bundles.  Track only the
+# numbers: the aggregated _sweep CSVs, and metrics.json — the raw per-run
+# record, which can ONLY be rebuilt by re-running the GPU jobs.
+outputs/**/*.png
+outputs/**/*.npz
+outputs/**/*.npy
+outputs/**/*.gif
+
+# LaTeX build products
+*.aux
+*.nav
+*.snm
+*.toc
+*.synctex.gz
+SB/*.out
+SB/*.log

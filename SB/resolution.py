@@ -168,7 +168,9 @@ def retrieve_b_2d_drift(g, t, gamma, mesh, beta_cells, n_steps):
     case).  β is the reference drift; 2γ∇log η* is the entropic correction."""
     g_t    = apply_logQt_fvm(g, 1.0 - t, gamma, mesh, beta_cells, n_steps)
     grad_g = heat_solver.compute_scalar_gradient_LSQ(g_t, mesh)
-    return beta_cells + 2.0 * gamma * grad_g
+    # beta_cells may be a (K,N,2) time stack ("SBsquared_exact"); the reference
+    # drift to add is the one acting AT THIS t, not the whole stack.
+    return advdiff_solver._beta_at(beta_cells, t) + 2.0 * gamma * grad_g
 
 
 @partial(jax.jit, static_argnames=["n_steps"])

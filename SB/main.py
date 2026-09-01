@@ -44,6 +44,69 @@ def _load_config() -> dict:
     return cfg
 
 
+def _bundle_aoa(path: str, default: float = 0.0) -> float:
+    """AoA in degrees from an ``AOA<x>_M<y>_...`` bundle filename."""
+    m = re.search(r"AOA([0-9.]+)_", os.path.basename(path or ""))
+    return float(m.group(1)) if m else default
+
+
+def _bundle_mach(path: str, default: float = 0.0) -> float:
+    """Freestream Mach from a bundle filename.
+
+    Two conventions exist: diamond writes ``AOA<x>_M<y>_...`` while bump writes
+    ``M<y>_...`` with no AoA prefix (``Euler/config.py:format_condition_tag`` adds
+    the prefix only for diamond).  Anchoring on ``_M`` alone silently missed every
+    bump bundle and returned the default, which collapsed all 22 bump Mach pairs
+    into a single ``M0.00-0.00`` output directory.
+    """
+    m = re.search(r"(?:^|_)M([0-9.]+)_", os.path.basename(path or ""))
+    return float(m.group(1)) if m else default
+
+
+def _axis_root_and_tag(case_cfg: dict) -> tuple[str, str]:
+    """(output root, case-level tag) selected by which parameter is interpolated.
+
+        AoA 0 → 0    ('Mach_interpolation', '')             Mach sweep, zero incidence
+        AoA 2 → 2    ('Mach_interpolation', 'aoa2.00')      Mach sweep, fixed incidence
+        AoA 0 → 4    ('AoA_interpolation',  'M2.00')        ANGLE sweep, fixed Mach
+
+    Two properties are deliberate.  The Mach-sweep tag is EMPTY at zero incidence,
+    so every already-finished run keeps its exact path instead of being stranded in
+    a sibling directory.  And the AoA-sweep tag carries the FIXED MACH: an angle
+    sweep at M2.00 and one at M2.50 are different experiments, and a tag naming
+    only the angles (``aoa0.00-4.00``) would silently collide between them.
+    """
+    a0 = case_cfg.get("aoa0")
+    a1 = case_cfg.get("aoa1")
+    if a0 is None:
+        a0 = case_cfg.get("aoa", _bundle_aoa(case_cfg.get("bundle0", "")))
+    if a1 is None:
+        a1 = case_cfg.get("aoa", _bundle_aoa(case_cfg.get("bundle1", ""), float(a0)))
+    a0, a1 = float(a0), float(a1)
+
+    if abs(a0 - a1) > 1e-9:                       # the bridge interpolates in ANGLE
+        m_fix = case_cfg.get("mach0_inlet")
+        if m_fix is None:
+            m_fix = _bundle_mach(case_cfg.get("bundle0", ""))
+        tag = f"M{float(m_fix):.2f}"
+        # Several angle sweeps at the SAME Mach (0->1, 1->2, ...) are different
+        # experiments; without a range level they would all land in one directory.
+        if not (abs(a0) < 1e-9 and abs(a1 - 4.0) < 1e-9):        # legacy 0->4 stays put
+            tag = os.path.join(tag, f"A{a0:.2f}-{a1:.2f}")
+        return "AoA_interpolation", tag
+
+    tag = "" if abs(a0) < 1e-9 else f"aoa{a0:.2f}"
+    # Same for the Mach axis: 0.80->0.90 and 2.90->3.00 are different bridges and
+    # need different directories.  The original 2.00->2.50 keeps its exact path.
+    m0 = _bundle_mach(case_cfg.get("bundle0", ""))
+    m1 = _bundle_mach(case_cfg.get("bundle1", ""))
+    if m0 is not None and m1 is not None and not (
+            abs(float(m0) - 2.00) < 1e-9 and abs(float(m1) - 2.50) < 1e-9):
+        rng = f"M{float(m0):.2f}-{float(m1):.2f}"
+        tag = os.path.join(tag, rng) if tag else rng
+    return "Mach_interpolation", tag
+
+
 def _mesh_h_tag(mesh_path: str) -> str:
     """'meshes/diamond/diamond_h0.0125.npy' → 'h0.0125'.
 
@@ -78,12 +141,22 @@ def _mach_output_dir(base_output_dir: str, cmach: dict, case_cfg: dict) -> str:
     # kind, then tag the smallest annealing γ used (so a new run never
     # overwrites a previous one).
     htag     = _mesh_h_tag(case_cfg.get("mesh", ""))
+    root, axistag = _axis_root_and_tag(case_cfg)
     drift    = cmach.get("reference_drift", "null") or "null"
+    # A seeded bootstrap is a different scheme from the heat-seeded one and must
+    # not share its directory: tag it drift_SBsquared_exact+ffd etc.  Unseeded
+    # runs keep their exact current paths.
+    seed = str(cmach.get("drift_bootstrap_seed", "null") or "null").lower()
+    if drift.startswith("SBsquared") and seed != "null":
+        drift = f"{drift}+{seed}"
     schedule = cmach.get("gamma_sb_schedule") or [cmach.get("gamma_sb", 0.002)]
     gamma_min = min(schedule)
     gtag = f"gmin{gamma_min:g}"
-    return os.path.join(base_output_dir, "Mach_interpolation", case, sub,
-                        htag, f"drift_{drift}", gtag)
+    parts = [base_output_dir, root, case, sub, htag]
+    if axistag:
+        parts.append(axistag)
+    parts += [f"drift_{drift}", gtag]
+    return os.path.join(*parts)
 
 
 def main():
@@ -165,7 +238,19 @@ def main():
                 drift_sigma_w=cmach.get("drift_sigma_w", 0.2),
                 drift_gamma_gas=cmach.get("drift_gamma_gas", 1.4),
                 drift_cfl_adv=cmach.get("drift_cfl_adv", 0.5),
-                drift_ffd_cfg = cmach.get("drift", {}).get("ffd", {})
+                drift_ffd_cfg = cmach.get("drift", {}).get("ffd", {}),
+                drift_bootstrap_smooth=cmach.get("drift_bootstrap_smooth", True),
+                drift_bootstrap_nt=cmach.get("drift_bootstrap_nt"),
+                drift_bootstrap_seed=cmach.get("drift_bootstrap_seed", "null"),
+                drift_bootstrap_start_gamma=cmach.get("drift_bootstrap_start_gamma",
+                                                      float("inf")),
+                drift_bootstrap_t_clip=cmach.get("drift_bootstrap_t_clip", 0.2),
+                drift_bootstrap_mask=cmach.get("drift_bootstrap_mask", True),
+                drift_bootstrap_mask_pct=cmach.get("drift_bootstrap_mask_pct", 50.0),
+                gate_to_flow=cmach.get("gate_to_flow", True),
+                metric_band_pct=cmach.get("metric_band_pct", 95.0),
+                save_fields=cmach.get("save_fields", True),
+                ffd_control=cmach.get("ffd_control", True),
             )
 
     else:

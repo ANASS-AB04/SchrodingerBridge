@@ -560,6 +560,331 @@ def compute_interpolation_error(t_array, methods_in,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Transport-quality metrics
+#
+#  WHY these exist alongside L2/L∞/W₂ and C_D/C_L.  On this case ~68% of cells
+#  sit at undisturbed freestream, which every method reproduces for free, so a
+#  domain-wide L2 mostly measures nothing: the top 5% of cells by |M−M∞| occupy
+#  1.9% of the area and carry only 17.5% of the field energy.  And C_D/C_L are
+#  integrals over the WALL, where the true transport is the identity (the body
+#  does not move between the two Mach numbers) — so they penalise transport
+#  rather than rewarding it, and a plain linear blend is near-optimal for them.
+#
+#  These four target the question the others dodge: did the shock end up in the
+#  right PLACE, with the right SHARPNESS, as a PHYSICALLY VALID jump?
+# ─────────────────────────────────────────────────────────────────────────────
+
+def shock_band_mask(mach_ref, mach_inf, pct=95.0):
+    """Cells in the top (100−pct)% by |M − M∞| of the REFERENCE field.
+
+    Taken from the reference, never from the reconstruction, so every method is
+    scored on the same set of cells and no method can flatter itself by moving
+    its own band.
+    """
+    pert = np.abs(np.asarray(mach_ref, dtype=float) - float(mach_inf))
+    return pert >= np.percentile(pert, pct)
+
+
+def le_shock_geometry(mesh):
+    """(x_le, y_axis, alpha_rad, chord) of the body, from mesh metadata.
+
+    ``alpha`` is the WEDGE half-angle and is NaN for any case that is not a
+    wedge.  Callers use that to skip the θ-β-M angle metrics rather than report
+    a number with no meaning: the bump is a bump on a channel wall, so it has no
+    leading-edge wedge and no attached oblique shock to measure an angle against.
+
+    The two cases also disagree on metadata layout — diamond writes
+    ``center = {"cx": .., "cy": ..}`` and ``height``, while bump writes a bare
+    float ``center`` and ``thickness``.  Assuming the diamond layout raised
+    ``AttributeError: 'float' object has no attribute 'get'`` and killed every
+    bump run after its plots were already on disk.
+    """
+    md    = getattr(mesh, "metadata", None) or {}
+    bary  = np.asarray(mesh.barycenter)
+    ctr   = md.get("center", {})
+    if isinstance(ctr, dict):
+        cx = float(ctr.get("cx", bary[:, 0].mean()))
+        cy = float(ctr.get("cy", bary[:, 1].mean()))
+    else:                                     # bump: a bare x-coordinate
+        try:
+            cx = float(ctr)
+        except (TypeError, ValueError):
+            cx = float(bary[:, 0].mean())
+        cy = float(bary[:, 1].mean())
+    chord = float(md.get("chord", 1.0) or 1.0)
+    height = md.get("height")
+    alpha = (float(np.arctan(float(height) / max(chord, 1e-30)))
+             if height is not None else float("nan"))
+    return cx - 0.5 * chord, cy, alpha, chord
+
+
+def shock_angle_deg(mach_field, mach_inf, mesh, thr_frac=0.02, n_stations=40,
+                    span=1.6, upper=True, return_locus=False):
+    """Leading-edge shock angle (deg) by following the DISTURBANCE BOUNDARY.
+
+    The LE shock is the upstream edge of the disturbed region, so for each x
+    station the extreme y at which |M − M∞| clears a small threshold lies ON the
+    shock; a straight fit through those points gives its angle.
+
+    A PCA fit to the thresholded cells does NOT work here — the upper half also
+    contains the shoulder expansion fan and the TE shock, and the principal axis
+    of that whole blob comes out near 11° when the true LE angle is 33°.  The
+    boundary is unambiguous where the blob is not.  Validated against the exact
+    θ-β-M value on a reference field: 33.462° measured vs 33.427° analytic.
+    """
+    x_le, y_ax, _, _ = le_shock_geometry(mesh)
+    bary = np.asarray(mesh.barycenter)
+    M    = np.asarray(mach_field, dtype=float)
+    dist = np.abs(M - float(mach_inf)) > thr_frac * abs(float(mach_inf))
+    side = (bary[:, 1] > y_ax) if upper else (bary[:, 1] < y_ax)
+    xs, pts = np.linspace(x_le + 0.05, x_le + span, n_stations), []
+    half = 0.5 * (xs[1] - xs[0]) if len(xs) > 1 else 0.03
+    for x0 in xs:
+        sel = side & dist & (np.abs(bary[:, 0] - x0) < max(half, 0.03))
+        if sel.sum() >= 3:
+            y = bary[sel, 1].max() if upper else bary[sel, 1].min()
+            pts.append((x0, y))
+    if len(pts) < 5:
+        return (float("nan"), None) if return_locus else float("nan")
+    pts = np.asarray(pts)
+    slope = np.polyfit(pts[:, 0], pts[:, 1], 1)[0]
+    ang = float(np.degrees(np.arctan(abs(slope))))
+    # The boundary points ARE the shock, so returning them costs nothing and lets
+    # the overlay plot draw the measured locus rather than only report its angle.
+    return (ang, pts) if return_locus else ang
+
+
+def shock_sharpness(mach_field, mesh, band):
+    """Peak and mean ‖∇M‖ over the reference shock band.
+
+    A transported shock keeps the endpoint fields' sharpness; a blended one is
+    the average of two jumps at different places, so its gradient is lower and
+    its band wider.  Nothing else in the metric set detects that.
+    """
+    g = np.asarray(heat_solver.compute_scalar_gradient_LSQ(
+        jnp.asarray(np.asarray(mach_field, dtype=float)), mesh))
+    gm = np.linalg.norm(g, axis=-1)
+    if not band.any():
+        return float("nan"), float("nan")
+    return float(gm[band].max()), float(gm[band].mean())
+
+
+def rh_residual(mach_field, mach_inf, mesh, beta_deg, gamma_g=1.4):
+    """|M₂ measured − M₂ from Rankine–Hugoniot| / M₂, behind the LE shock.
+
+    PHYSICAL ADMISSIBILITY, and the one metric here that asks whether a frame is
+    a flow at all rather than an average of two.  A convex blend of two valid
+    shock states is NOT itself a valid shock state: its geometry (the angle β it
+    appears to have) and its amplitude (the Mach it actually drops to) satisfy no
+    common RH jump.  Measuring both from the same field and checking them against
+    each other therefore penalises blending specifically — and it is independent
+    of the angle error, since a field can have the right β with the wrong jump.
+
+    Note this compares the field against PHYSICS, not against the reference, so
+    it carries no reference-discretisation noise floor.
+    """
+    if not np.isfinite(beta_deg):
+        return float("nan")
+    x_le, y_ax, alpha, chord = le_shock_geometry(mesh)
+    b    = np.radians(beta_deg)
+    Mn1  = float(mach_inf) * np.sin(b)
+    if Mn1 <= 1.0:                                   # not a compression shock
+        return float("nan")
+    Mn2  = np.sqrt((1.0 + 0.5 * (gamma_g - 1.0) * Mn1 ** 2)
+                   / (gamma_g * Mn1 ** 2 - 0.5 * (gamma_g - 1.0)))
+    denom = np.sin(b - alpha)
+    if abs(denom) < 1e-9:
+        return float("nan")
+    M2_pred = Mn2 / denom
+    # Sample the post-shock wedge: above the upper surface, below the shock ray,
+    # between the leading edge and the shoulder.
+    bary = np.asarray(mesh.barycenter)
+    dx   = bary[:, 0] - x_le
+    dy   = bary[:, 1] - y_ax
+    inwedge = ((dx > 0.15 * chord) & (dx < 0.45 * chord) & (dy > 0)
+               & (dy > 1.15 * dx * np.tan(alpha))     # clear of the surface
+               & (dy < 0.85 * dx * np.tan(b)))        # clear of the shock
+    if inwedge.sum() < 5:
+        return float("nan")
+    M2_meas = float(np.median(np.asarray(mach_field, dtype=float)[inwedge]))
+    return float(abs(M2_meas - M2_pred) / max(abs(M2_pred), 1e-30))
+
+
+def compute_transport_metrics(t_array, methods_in, ref_bundle_paths, mesh,
+                              band_pct=95.0, gamma_g=1.4):
+    """Shock-placement / sharpness / admissibility scores for every method.
+
+    Returns {"t_ref", "ref": {...}, "methods": {name: {...}}} for metrics.json.
+    """
+    area   = np.asarray(mesh.area)
+    _, _, alpha, _ = le_shock_geometry(mesh)
+    # No wedge (bump) => no leading-edge oblique shock, so the ANGLE-based
+    # metrics have nothing to measure against.  shock_angle_deg would still
+    # return a number by fitting the disturbance boundary, and rh_residual would
+    # consume that number, but both would be meaningless — report NaN instead.
+    # The band-L2 and sharpness metrics are geometry-agnostic and still apply.
+    wedge = bool(np.isfinite(alpha))
+    if not wedge:
+        print("  [note] non-wedge geometry: shock-angle and RH metrics are NaN "
+              "(band-L2 and sharpness still measured)")
+    _nan = float("nan")
+
+    t_ref   = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
+    methods = list(methods_in.items())
+    out     = {n: {"l2_band": [], "angle_deg": [], "angle_err_deg": [],
+                   "grad_max": [], "grad_mean": [], "rh_res": [], "locus": []}
+               for n, _ in methods}
+    ref_out = {"angle_deg": [], "angle_analytic_deg": [], "grad_max": [],
+               "grad_mean": [], "rh_res": [], "mach_inf": [], "locus": []}
+
+    tol_frame = 0.5 / max(len(t_array) - 1, 1)
+    print("  ┌─ Transport metrics (shock band = top "
+          f"{100-band_pct:g}% of |M−M∞| in the reference) ──────────")
+    hdr = f"  │  {'t':>4s}  {'β_exact':>8s}  {'β_ref':>7s}"
+    hdr += "".join(f"  {n+' Δβ':>10s}  {n+' L2band':>11s}" for n, _ in methods)
+    print(hdr)
+
+    for t_val, ref_path in zip(t_ref, ref_bundle_paths):
+        idx = int(np.argmin(np.abs(t_array - t_val)))
+        assert abs(t_array[idx] - t_val) <= tol_frame
+        data = np.load(ref_path)
+        mach_ref = data["mach"].astype(float)
+        m_inf    = float(np.asarray(data["mach_in"]).ravel()[0])
+        data.close()
+
+        band    = shock_band_mask(mach_ref, m_inf, band_pct)
+        nrm_ref = float(np.sqrt(np.sum(mach_ref[band] ** 2 * area[band])))
+        if wedge:
+            a_ref, loc_ref = shock_angle_deg(mach_ref, m_inf, mesh,
+                                             return_locus=True)
+            s_ref = rh_residual(mach_ref, m_inf, mesh, a_ref, gamma_g)
+        else:
+            a_ref, loc_ref, s_ref = _nan, None, _nan
+        gmx_r, gmn_r = shock_sharpness(mach_ref, mesh, band)
+        try:
+            a_exact = float(np.degrees(drift_mod.beta_le(m_inf, alpha, gamma_g)))
+        except Exception:                                    # noqa: BLE001
+            a_exact = float("nan")
+        ref_out["angle_deg"].append(a_ref)
+        ref_out["angle_analytic_deg"].append(a_exact)
+        ref_out["grad_max"].append(gmx_r);  ref_out["grad_mean"].append(gmn_r)
+        ref_out["rh_res"].append(s_ref);  ref_out["mach_inf"].append(m_inf)
+        ref_out["locus"].append(loc_ref.tolist() if loc_ref is not None else None)
+
+        row = f"  │  {t_val:.1f}  {a_exact:8.3f}  {a_ref:7.3f}"
+        for name, seq in methods:
+            fld  = np.asarray(seq[idx], dtype=float)
+            diff = fld - mach_ref
+            l2b  = float(np.sqrt(np.sum(diff[band] ** 2 * area[band]))
+                         / max(nrm_ref, 1e-30))
+            if wedge:
+                ang, loc = shock_angle_deg(fld, m_inf, mesh, return_locus=True)
+            else:
+                ang, loc = _nan, None
+            gmx, gmn = shock_sharpness(fld, mesh, band)
+            out[name]["l2_band"].append(l2b)
+            out[name]["angle_deg"].append(ang)
+            out[name]["angle_err_deg"].append(abs(ang - a_exact))
+            out[name]["grad_max"].append(gmx)
+            out[name]["grad_mean"].append(gmn)
+            out[name]["rh_res"].append(
+                rh_residual(fld, m_inf, mesh, ang, gamma_g) if wedge else _nan)
+            out[name]["locus"].append(loc.tolist() if loc is not None else None)
+            row += f"  {abs(ang-a_exact):10.4f}  {l2b:11.4e}"
+        print(row)
+    print("  └──────────────────────────────────────────────────────────────")
+    for name, _ in methods:
+        d = out[name]
+        sharp = (np.nanmean(d["grad_max"])
+                 / max(np.nanmean(ref_out["grad_max"]), 1e-30))
+        print(f"    {name:>8s}:  L2_band={np.nanmean(d['l2_band']):.4e}  "
+              f"Δβ={np.nanmean(d['angle_err_deg']):.4f}°  "
+              f"sharpness={100*sharp:.1f}% of ref  "
+              f"RH_res={np.nanmean(d['rh_res']):.4e}")
+
+    return {"t_ref": [float(t) for t in t_ref], "ref": ref_out,
+            "band_pct": float(band_pct), "methods": out}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Reference-drift diagnostics and conditioning
+# ─────────────────────────────────────────────────────────────────────────────
+
+def face_peclet_max(mesh, beta_np, gamma):
+    """max over faces of  Pe_f = |β·n|_f · d_ij / γ.
+
+    The operative number for the drifted kernel — NOT the area/perimeter dx
+    metric, which understates it ~4×.  First-order upwind stays positive and
+    monotone at any Pe, but Pe>1 quantifies the anisotropic numerical diffusion
+    (~|β·n|·d/2) the linear kernel adds on top of γ.
+    """
+    beta_np = np.asarray(beta_np, dtype=float)
+    if beta_np.ndim == 3:          # (K,N,2) time stack → worst slice
+        return max(face_peclet_max(mesh, b, gamma) for b in beta_np)
+    nb   = np.asarray(mesh.neighbors)
+    fc   = np.asarray(mesh.face_connectivity)
+    bary = np.asarray(mesh.barycenter)
+    nrm  = np.asarray(mesh.normals)                       # (N,3,2)
+    isb  = np.asarray(mesh.face_markers)[fc] > 0
+    bi   = np.repeat(beta_np[:, None, :], 3, axis=1)
+    bj   = np.where(isb[..., None], bi, beta_np[np.where(nb >= 0, nb, 0)])
+    bn   = np.sum(0.5 * (bi + bj) * nrm, axis=-1)         # β·n per face
+    dij  = np.linalg.norm(bary[np.where(nb >= 0, nb, 0)] - bary[:, None, :], axis=-1)
+    pe   = np.where(isb, 0.0, np.abs(bn) * dij / max(float(gamma), 1e-30))
+    return float(pe.max())
+
+
+def density_mask_weight(mu0, mu1, mesh, pct=50.0):
+    """Smooth 0..1 weight marking where the marginals actually carry mass.
+
+    The bootstrapped drift b = 2γ∇g_t is a LOG-potential gradient, so it is only
+    meaningful where the marginal constrains the potential.  In the empty region
+    upstream and outboard of the shock cone the density sits pinned at the
+    background floor, the IPFP leaves g unconstrained there, and ∇g is whatever
+    the kernel happens to leave behind — amplified by the log, and then fed back
+    in and re-amplified at every annealing stage.
+
+    Measured consequence without this mask (h0.025, γ=1e-4): |β|_max reaches 2.55
+    in two lobes sitting in the VOID, against a true shock displacement of 0.0074
+    — two orders of magnitude too large, and in the wrong place.  It inflates the
+    leak-bias reference (bias_T_max 0.495 vs FFD's 0.042), sets the advective CFL
+    and the Péclet from noise (Pe 1179 vs 204), and smears the reconstruction.
+
+    Note this is NOT high-frequency noise, so heat-smoothing does not remove it —
+    it is large-scale spurious structure, and only a mass-based gate kills it.
+
+    w = ρ/(ρ + ρ_ref) with ρ = max(μ0, μ1) and ρ_ref the ``pct``-th percentile:
+    smooth, no hard cutoff, →1 where there is mass and →0 where there is none.
+    """
+    rho = np.maximum(np.asarray(mu0, dtype=float), np.asarray(mu1, dtype=float))
+    rho_ref = float(np.percentile(rho, pct))
+    if not np.isfinite(rho_ref) or rho_ref <= 0.0:
+        rho_ref = float(np.mean(rho)) or 1.0
+    return jnp.asarray(rho / (rho + rho_ref))
+
+
+def smooth_drift_field(beta, mesh, smooth_gamma, smooth_t, n_steps_smooth):
+    """Heat-smooth each component of a cell-centred drift field.
+
+    Only used by the bootstrapped ("SBsquared") drift.  The recovered drift comes
+    from ``compute_scalar_gradient_LSQ(g_t)``, and that cell-to-cell LSQ gradient
+    noise is exactly why the barycentric CDI was built gradient-free (see the
+    header of the barycentric section).  Feeding it back into the kernel for a
+    dozen annealing stages would compound it, so one short heat solve per stage
+    keeps the reference drift smooth without changing its large-scale transport.
+    """
+    b = jnp.asarray(beta)
+    if b.ndim == 3:                # (K,N,2) time stack → smooth each slice
+        return jnp.stack([smooth_drift_field(b[k], mesh, smooth_gamma, smooth_t,
+                                             n_steps_smooth)
+                          for k in range(b.shape[0])], axis=0)
+    out = [heat_solver.solve_heat_equation(b[:, d], smooth_t, smooth_gamma,
+                                           mesh, n_steps_smooth)
+           for d in range(b.shape[1])]
+    return jnp.stack(out, axis=1)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Aerodynamic coefficients  (scalar transport-quality metric)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -890,24 +1215,36 @@ def compute_sb_barycentric_maps(f, g, gamma, mesh, n_steps):
     return T_raw - bias, S_raw - bias, jnp.exp(log_den_T), jnp.exp(log_den_S), bias, bias
 
 
-def _trust_gate(M, bary, cap):
+def _trust_gate(M, bary, cap, fallback=None):
     """
     A conditional mean cannot legitimately move further than the reference flow
     plus a few diffusion lengths.  Cells whose kernel support has collapsed (the
-    "worst T/S" outliers) produce garbage displacements; revert those to the
-    identity so CDI degrades locally to linear interpolation instead of sampling
-    the field at a meaningless location.  ``cap`` is max|Φ−x| + 4σ (drifted) or
-    4σ alone (β≡0, Φ=id) — the gate itself always measures displacement from the
-    identity ``bary``, not from Φ.
+    "worst T/S" outliers) produce garbage displacements and must be replaced.
+
+    ``fallback`` is what a rejected cell reverts to.  For the pure-heat bridge
+    (β≡0) the only sensible answer is the identity ``bary``.  For a DRIFTED bridge
+    it must be the reference flow Φ_β instead: reverting to the identity throws
+    away the transport the reference drift already knew about, so the cell
+    degrades all the way to linear interpolation.  That is not a rare event —
+    at h=0.0125, γ=1e-4 the log-domain kernel collapses (den_T_max ~ 1e273) and
+    the gate rejects 41.5% of cells, which then leave the shock unmoved and show
+    up as a bright one-sided error line right along it.  Falling back to Φ_β
+    keeps at least the registration's own transport in those cells.
+
+    ``cap`` is max|Φ−x| + 4σ (drifted) or 4σ alone (β≡0, Φ=id); the gate always
+    measures displacement from the identity ``bary``, not from Φ.
     """
+    if fallback is None:
+        fallback = bary
     r  = jnp.linalg.norm(M - bary, axis=-1, keepdims=True)
     ok = jnp.isfinite(r) & (r <= cap)
-    return jnp.where(ok, M, bary)
+    return jnp.where(ok, M, fallback)
 
 
-@_partial(jax.jit, static_argnames=["n_steps"])
+@_partial(jax.jit, static_argnames=["n_steps", "gate_to_flow"])
 def compute_sb_barycentric_maps_drift(f, g, gamma, mesh, beta_cells,
-                                      phi_fwd, phi_bwd, n_steps):
+                                      phi_fwd, phi_bwd, n_steps,
+                                      gate_to_flow=True):
     """
     Drifted SB barycentric maps (stable log-domain), the β-generalisation of
     compute_sb_barycentric_maps.  The forward map T is built from g through Q₁
@@ -986,12 +1323,14 @@ def compute_sb_barycentric_maps_drift(f, g, gamma, mesh, beta_cells,
     T = T_raw - bias_T
     S = S_raw - bias_S
 
-    # ── Trust gate: revert kernel-collapse outliers to the identity ──
+    # ── Trust gate: revert kernel-collapse outliers to the REFERENCE FLOW ──
+    # Φ_β, not the identity: a rejected cell still needs transporting, and the
+    # drift already supplies a defensible estimate of it (see _trust_gate).
     sigma = jnp.sqrt(2.0 * gamma)
     cap_T = jnp.max(jnp.linalg.norm(phi_fwd - bary, axis=-1)) + 4.0 * sigma
     cap_S = jnp.max(jnp.linalg.norm(phi_bwd - bary, axis=-1)) + 4.0 * sigma
-    T = _trust_gate(T, bary, cap_T)
-    S = _trust_gate(S, bary, cap_S)
+    T = _trust_gate(T, bary, cap_T, fallback=(phi_fwd if gate_to_flow else None))
+    S = _trust_gate(S, bary, cap_S, fallback=(phi_bwd if gate_to_flow else None))
 
     return T, S, jnp.exp(log_den_T), jnp.exp(log_den_S), bias_T, bias_S
 
@@ -1395,7 +1734,13 @@ def run_mach_interpolation_case(
         mach0_inlet=None, mach1_inlet=None,
         compute_w2=True, wass_gamma=0.005, wass_iter=50,
         reference_drift="null", drift_sigma_w=0.2,
-        drift_gamma_gas=1.4, drift_cfl_adv=0.5,drift_ffd_cfg=None):
+        drift_gamma_gas=1.4, drift_cfl_adv=0.5, drift_ffd_cfg=None,
+        drift_bootstrap_smooth=True, drift_bootstrap_nt=None,
+        drift_bootstrap_seed="null", drift_bootstrap_start_gamma=float("inf"),
+        drift_bootstrap_t_clip=0.2,
+        drift_bootstrap_mask=True, drift_bootstrap_mask_pct=50.0,
+        gate_to_flow=True, ffd_control=True, metric_band_pct=95.0,
+        save_fields=True):
     os.makedirs(output_dir, exist_ok=True)
     print(f"\n{'─'*55}\n  Mach SB-CDI Interpolation\n{'─'*55}")
  
@@ -1413,6 +1758,22 @@ def run_mach_interpolation_case(
  
     print("  [2/6] Loading Mach bundles …")
     data0   = np.load(bundle_path0);  data1 = np.load(bundle_path1)
+    # Angle of attack, read from the bundles themselves rather than parsed from the
+    # filename.  It goes into metrics.json so the analysis can separate AoA sweeps:
+    # at AoA=0 the diamond is symmetric and C_L is pure mesh-asymmetry noise, so
+    # mixing AoA cases in one plot would compare a real lift against a numerical one.
+    aoa0 = float(np.asarray(data0["aoa_in"]).ravel()[0]) if "aoa_in" in data0.files else 0.0
+    aoa1 = float(np.asarray(data1["aoa_in"]).ravel()[0]) if "aoa_in" in data1.files else 0.0
+    # aoa0 != aoa1 is NOT an error: it means the bridge interpolates in ANGLE OF
+    # ATTACK at fixed Mach rather than in Mach at fixed AoA.  The pipeline is
+    # agnostic — it transports between two snapshots — so the only thing that
+    # changes is which parameter labels the axis.
+    aoa_deg   = aoa0
+    interp_axis = "mach" if abs(aoa0 - aoa1) <= 1e-9 else "aoa"
+    if interp_axis == "aoa":
+        print(f"    interpolation axis: ANGLE OF ATTACK  {aoa0:.2f}° → {aoa1:.2f}°")
+    else:
+        print(f"    interpolation axis: MACH  (AoA fixed at {aoa0:.2f}°)")
     mach0   = data0["mach"].astype(float)
     mach1   = data1["mach"].astype(float)
     prims0  = data0["primitives"].astype(float)
@@ -1494,10 +1855,54 @@ def run_mach_interpolation_case(
                       filename=os.path.join(output_dir, fname), cmap="hot")
  
     # ── [4b] Reference drift β (conditions the bridge; referrence_drift.tex) ───
-    use_drift = reference_drift not in (None, "null", "none", "off")
+    # "SBsquared" is the bootstrapped/self-conditioned drift: β is NOT built here.
+    # It starts at 0 (stage 0 is a pure-heat bridge) and each γ stage takes its
+    # reference drift from the PREVIOUS stage's own SB solution, β_{k+1} = b^(k).
+    # See the annealing loop below.
+    bootstrap_drift = reference_drift in ("SBsquared", "SBsquared_exact")
+    # "_exact" carries the FULL time-dependent beta(t) through the kernel instead
+    # of collapsing it to the single t=0.5 field.
+    bootstrap_exact = reference_drift == "SBsquared_exact"
+    nt_boot = int(drift_bootstrap_nt or n_frames)
+    # Where the drift is allowed to be non-zero (bootstrap modes only).
+    drift_mask_w = None
+    if bootstrap_drift and drift_bootstrap_mask:
+        drift_mask_w = density_mask_weight(mu0, mu1, mesh,
+                                           pct=drift_bootstrap_mask_pct)
+        _w = np.asarray(drift_mask_w)
+        print(f"    drift density mask: pct={drift_bootstrap_mask_pct:g}  "
+              f"mean w={_w.mean():.3f}  cells with w>0.5: "
+              f"{100.0 * (_w > 0.5).mean():.1f}%")
+    use_drift = reference_drift not in (None, "null", "none", "off") and not bootstrap_drift
     beta_ipfp = None
+    beta_np   = None
+    beta_max  = 0.0
+    pe_max    = 0.0
     ffd_maps = None          # (T_ffd, S_ffd) when the FFD registration is available
+    _b_ffd = None            # registration β, kept for the bootstrap seed
     t_ffd_reg = None
+
+    # The FFD registration doubles as a γ-independent CONTROL interpolator.  Run it
+    # for EVERY drift mode, not just the ones that use it as a kernel drift: the
+    # point of the control is that BaryCDI / Linear / FFD are comparable in one
+    # table, and gating it on the bootstrap modes alone left the FFD column NaN on
+    # every null and oblique run — precisely the rows where "does SB beat the raw
+    # registration" most needed answering.  Costs one registration, mesh-independent
+    # (fixed 144² grid, 800 Adam iterations), and cached per (config, marginals).
+    want_ffd_control = (reference_drift == "ffd") or ffd_control
+    if want_ffd_control and reference_drift != "ffd":
+        from . import ffd_drift
+        _t0 = _time.perf_counter()
+        _b_ffd, _a_ffd = ffd_drift.build_ffd_beta(
+            mesh, np.asarray(smoothed0), np.asarray(smoothed1),
+            cfg=drift_ffd_cfg, cache_dir=output_dir,
+            tag=f"M{mach0_inlet}_M{mach1_inlet}")
+        t_ffd_reg = _time.perf_counter() - _t0
+        _bary_np = np.asarray(mesh.barycenter)
+        ffd_maps = (_bary_np + _b_ffd, _bary_np + _a_ffd)
+        print(f"    FFD registration run as CONTROL only "
+              f"(kernel drift is '{reference_drift}')  {t_ffd_reg:.1f}s")
+
     if use_drift:
         if reference_drift == "ffd":
             # FFD-registration drift builds its own β directly from the marginals.
@@ -1524,22 +1929,7 @@ def run_mach_interpolation_case(
                 gamma_g=drift_gamma_gas, sigma_w=drift_sigma_w)[0]
         beta_ipfp = jnp.asarray(beta_np)
         beta_max  = float(np.max(np.linalg.norm(beta_np, axis=1)))
-        # #1 risk check: the operative number is the face Péclet
-        # Pe_f = |β·n|_f · d_ij / γ  (not the area/perimeter dx metric, which
-        # understates it ~4×).  First-order upwind is positive/monotone at any
-        # Pe, but Pe>1 quantifies the anisotropic numerical diffusion (~|β·n|d/2)
-        # the linear kernel adds.
-        _nb    = np.asarray(mesh.neighbors)
-        _fc    = np.asarray(mesh.face_connectivity)
-        _bary  = np.asarray(mesh.barycenter)
-        _nrm   = np.asarray(mesh.normals)                     # (N,3,2)
-        _isb   = np.asarray(mesh.face_markers)[_fc] > 0
-        _bi    = np.repeat(beta_np[:, None, :], 3, axis=1)
-        _bj    = np.where(_isb[..., None], _bi, beta_np[np.where(_nb >= 0, _nb, 0)])
-        _bn    = np.sum(0.5 * (_bi + _bj) * _nrm, axis=-1)    # β·n per face
-        _dij   = np.linalg.norm(_bary[np.where(_nb >= 0, _nb, 0)] - _bary[:, None, :], axis=-1)
-        _pe    = np.where(_isb, 0.0, np.abs(_bn) * _dij / max(gamma_sb, 1e-30))
-        pe_max = float(_pe.max())
+        pe_max    = face_peclet_max(mesh, beta_np, gamma_sb)
         print(f"    reference_drift='{reference_drift}'  |β|_max={beta_max:.4f}  "
               f"σ_w={drift_sigma_w}")
         print(f"    face Péclet max = {pe_max:.2f}  (γ_sb={gamma_sb:.2e}; upwind "
@@ -1554,24 +1944,74 @@ def run_mach_interpolation_case(
     tag = f"drifted ({reference_drift})" if use_drift else "heat"
     print(f"  [4/6] Anderson IPFP [{tag}] — γ-annealing {schedule}  (device {dev.platform.upper()})")
 
-    def _n_steps_ipfp(gk):
-        if use_drift:
+    def _n_steps_ipfp(gk, drifted, bmax):
+        if drifted:
             return advdiff_solver.compute_n_steps_advdiff(
-                mesh, gk, beta_max, CFL_diff=ipfp_cfl, CFL_adv=drift_cfl_adv)
+                mesh, gk, bmax, CFL_diff=ipfp_cfl, CFL_adv=drift_cfl_adv)
         return heat_solver.compute_n_steps(mesh, gk, CFL=ipfp_cfl)
+
+    if bootstrap_drift and len(schedule) < 2:
+        print(f"    [WARN] reference_drift='{reference_drift}' needs at least TWO γ stages "
+              f"(stage 0 is the pure-heat bridge that SEEDS the drift).  With "
+              f"{len(schedule)} stage(s) this run is identical to reference_drift='null'.")
 
     f = g = None
     ipfp_residuals, stage_bounds = [], []
     ipfp_residuals_l2 = []
     ipfp_stages = []                      # per-stage stats → metrics.json
     IPFP_TOL = float(ipfp_tol)
+    # Bootstrap state: β carried from one γ stage to the next.  None → heat kernel.
+    beta_k      = beta_ipfp if use_drift else None
+    beta_max_k  = beta_max if use_drift else 0.0
+    beta_prev_np = None
+
+    # ── Bootstrap SEEDING ────────────────────────────────────────────────────
+    # The measured failure of the heat-seeded bootstrap: stage 0 recovers
+    # b = 2γ∇g from a HEAT bridge at γ≈0.2 — a huge (|b|≈2.8) field dominated by
+    # the unconstrained void — and the mid-ladder spends eight rungs washing it
+    # out, losing to every other drift (at γ=2e-2 even to Linear) before winning
+    # ~11% at γ≤5e-4.  Seeding from the FFD registration deletes that phase:
+    # β starts at |β|≈0.4, localised on the shocks, and the bootstrap only
+    # refines.  Together with drift_bootstrap_start_gamma (recovery engages only
+    # once the NEXT stage's γ drops strictly below it), the seeded stages are
+    # literally a drift_ffd run.
+    boot_seed = (drift_bootstrap_seed or "null").lower()
+    if bootstrap_drift and boot_seed != "null":
+        if boot_seed == "ffd":
+            if _b_ffd is not None:         # reuse the control's registration
+                seed_np = np.asarray(_b_ffd)
+            else:                          # ffd_control off → register just for the seed
+                from . import ffd_drift
+                seed_np, _ = ffd_drift.build_ffd_beta(
+                    mesh, np.asarray(smoothed0), np.asarray(smoothed1),
+                    cfg=drift_ffd_cfg, cache_dir=output_dir,
+                    tag=f"M{mach0_inlet}_M{mach1_inlet}")
+        elif boot_seed == "oblique":
+            if mach0_inlet is None or mach1_inlet is None:
+                raise ValueError("drift_bootstrap_seed='oblique' needs mach0/1_inlet")
+            seed_np = drift_mod.build_reference_drift(
+                mesh, "oblique", [0.5], float(mach0_inlet), float(mach1_inlet),
+                gamma_g=drift_gamma_gas, sigma_w=drift_sigma_w)[0]
+        else:
+            raise ValueError(f"unknown drift_bootstrap_seed {boot_seed!r}")
+        beta_np    = np.asarray(seed_np)
+        beta_k     = jnp.asarray(beta_np)
+        beta_ipfp  = beta_k
+        beta_max_k = float(np.max(np.linalg.norm(beta_np, axis=1)))
+        beta_max   = beta_max_k
+        use_drift  = True                  # drifted kernel from stage 0
+        pe_max     = face_peclet_max(mesh, beta_np, min(schedule))
+        print(f"    bootstrap seed='{boot_seed}'  |β|_max={beta_max_k:.4f}  "
+              f"fixed until γ < {drift_bootstrap_start_gamma:g}, then "
+              f"{'EXACT β(t)' if bootstrap_exact else 'frozen t=0.5'} bootstrap")
     t_total0 = _time.perf_counter()
     for k, gk in enumerate(schedule):
-        n_steps_k = _n_steps_ipfp(gk)
+        drifted_k = beta_k is not None
+        n_steps_k = _n_steps_ipfp(gk, drifted_k, beta_max_k)
         t0 = _time.perf_counter()
-        if use_drift:
+        if drifted_k:
             f, g, res_k, res_l2_k = apply_IPFP_2d_anderson_drift(
-                log_mu0, log_mu1, gk, mesh, beta_ipfp, n_steps=n_steps_k,
+                log_mu0, log_mu1, gk, mesh, beta_k, n_steps=n_steps_k,
                 num_iter=num_iter, tol=IPFP_TOL, m=anderson_m, print_every=50,
                 f_init=f, g_init=g)
         else:
@@ -1583,18 +2023,106 @@ def run_mach_interpolation_case(
         dt = _time.perf_counter() - t0
         ipfp_residuals.extend(res_k);  stage_bounds.append(len(ipfp_residuals))
         ipfp_residuals_l2.extend(res_l2_k)
-        ipfp_stages.append(dict(
+        stage = dict(
             gamma=float(gk), n_steps=int(n_steps_k), iters=int(len(res_k)),
             final_res=float(res_k[-1]) if res_k else None,
             final_res_l2=float(res_l2_k[-1]) if res_l2_k else None,
-            converged=bool(res_k and res_k[-1] < IPFP_TOL), time_s=float(dt)))
+            converged=bool(res_k and res_k[-1] < IPFP_TOL), time_s=float(dt),
+            drifted=bool(drifted_k), beta_max=float(beta_max_k),
+            drift_source=("bootstrap" if (bootstrap_drift and beta_prev_np is not None)
+                          else ("seed-fixed" if (bootstrap_drift and drifted_k)
+                                else ("external" if drifted_k else "heat"))),
+            # Warm-starting (f,g) across a kernel that MOVES between stages is new
+            # to the bootstrap; the first residual of each stage says how much the
+            # previous stage's potentials still apply.
+            first_res=float(res_k[0]) if res_k else None)
         norms = (f"  res∞={res_k[-1]:.2e}  resL2={res_l2_k[-1]:.2e}" if res_k else "")
         print(f"    stage {k+1}/{len(schedule)}  γ={gk:.4g}  n_steps={n_steps_k}  "
+              f"{'drifted' if drifted_k else 'heat   '}  "
               f"{len(res_k)} iters  {dt:.3f} s  "
               f"({1e3*dt/max(len(res_k),1):.1f} ms/iter){norms}")
+
+        # ── Bootstrap: this stage's optimal drift becomes the next stage's β ──
+        # b = β + 2γ∇g_t is the TOTAL drift, so the entropic correction accumulates
+        # into the reference instead of being rediscovered each stage.  The true SB
+        # solution is a fixed point (β optimal ⇒ ∇g→0 ⇒ β'=β), so beta_delta below
+        # decaying down the ladder is the signature that this is converging.
+        # Recovery engages only once the NEXT stage's γ is strictly below the
+        # switch (drift_bootstrap_start_gamma = inf → every stage, the original
+        # behaviour; = 0 → never, i.e. the seed rides the whole ladder unchanged
+        # and a seeded run is exactly a drift_ffd run).
+        if (bootstrap_drift and k + 1 < len(schedule)
+                and schedule[k + 1] < drift_bootstrap_start_gamma):
+            def _recover(tv):
+                if drifted_k:
+                    return retrieve_b_2d_drift(g, tv, gk, mesh, beta_k, n_steps_k)
+                return retrieve_b_2d(g, tv, gk, mesh, n_steps_k)
+            if bootstrap_exact:
+                # b_t at nt_boot SB times → a (K,N,2) stack the kernel indexes
+                # directly (Q backward in t, Q† forward — see the DIRECTION TRAP
+                # note in advdiff_solver).
+                #
+                # SAMPLED ON [clip, 1-clip], NOT [0, 1].  b_t = 2γ∇g_t with
+                # g_t = log Q_{1-t}[e^g], so at t=1 the semigroup is the IDENTITY
+                # and g_t is the RAW log-potential — whose gradient across the
+                # void/ridge boundary is enormous on a log scale.  Measured on a
+                # synthetic void+ridge potential:
+                #     t     0.00  0.25  0.50  0.75  0.90   1.00
+                #     |b|   1.35  1.50  1.79  2.40  3.70  13.76
+                # The frozen t=0.5 mode never sees that endpoint; the exact mode
+                # does, and |β|_max sets the advective CFL and Péclet for the
+                # WHOLE kernel — so one singular slice poisons every stage (a
+                # heat-seeded exact run reached |β|=12.96 against the frozen
+                # mode's 2.4).  The kernel interpolates the stack by index, so
+                # clipping simply clamps the end slices to the nearest interior
+                # value rather than changing the time mapping.
+                _c = float(np.clip(drift_bootstrap_t_clip, 0.0, 0.49))
+                b_next = jnp.stack([_recover(float(tv))
+                                    for tv in np.linspace(_c, 1.0 - _c, nt_boot)],
+                                   axis=0)
+            else:
+                b_next = _recover(0.5)
+            if drift_bootstrap_smooth:
+                b_next = smooth_drift_field(b_next, mesh, smooth_gamma, smooth_t,
+                                            n_steps_smooth)
+            # Kill the drift where there is no mass to transport (see
+            # density_mask_weight).  Applied AFTER smoothing so the heat solve
+            # cannot bleed void-drift back across the mask edge.
+            if drift_mask_w is not None:
+                b_next = b_next * (drift_mask_w[:, None] if b_next.ndim == 2
+                                   else drift_mask_w[None, :, None])
+            b_next_np = np.asarray(b_next)
+            area_np   = np.asarray(mesh.area, dtype=float)
+            w_np      = area_np / max(float(area_np.sum()), 1e-30)
+            if beta_prev_np is None:
+                beta_delta = float("nan")     # nothing to compare against yet
+            else:
+                d = b_next_np - beta_prev_np
+                # For a (K,N,2) stack this averages the L2(dx) distance over the
+                # K sampled times as well as over space.
+                beta_delta = float(np.sqrt(np.mean(np.sum(w_np * np.sum(d * d, axis=-1),
+                                                          axis=-1))))
+            stage["beta_delta"] = beta_delta
+            beta_prev_np = b_next_np
+            beta_k     = jnp.asarray(b_next)
+            beta_max_k = advdiff_solver.beta_max_of(b_next_np)
+            beta_np    = b_next_np
+            beta_ipfp  = beta_k
+            use_drift  = True                  # downstream: maps/CDI are drifted
+            pe_next    = face_peclet_max(mesh, b_next_np, schedule[k + 1])
+            pe_max     = pe_next          # ends as the final stage's Péclet
+            stage["beta_max_next"] = beta_max_k
+            stage["pe_max_next"]   = pe_next
+            print(f"      → β for next stage: |β|_max={beta_max_k:.4f}  "
+                  f"Pe_max={pe_next:.2f}  "
+                  f"‖β−β_prev‖_L²={beta_delta:.3e}"
+                  f"{'  (smoothed)' if drift_bootstrap_smooth else ''}")
+        ipfp_stages.append(stage)
     t_total = _time.perf_counter() - t_total0
     gamma_sb = schedule[-1]
-    n_steps  = _n_steps_ipfp(gamma_sb)
+    n_steps  = _n_steps_ipfp(gamma_sb, use_drift, beta_max_k)
+    if use_drift:
+        beta_max = beta_max_k
     print(f"    IPFP total time: {t_total:.3f} s  ({len(ipfp_residuals)} iters, "
           f"final γ={gamma_sb:.4g})")
 
@@ -1661,13 +2189,20 @@ def run_mach_interpolation_case(
         # phantom displacement at the outflow edge or the wedge's shock feet.
         # Uses the SAME frozen beta_np the kernel advects with (beta_ipfp),
         # not a re-evaluated assemble_drift(t).
-        phi_fwd = jnp.asarray(drift_mod.flow_map(barycenters, beta_np, sign=+1.0,
+        # flow_map integrates ONE velocity field over unit time.  For a (K,N,2)
+        # beta(t) stack the right single field for a net unit-time displacement is
+        # the time average — that is what the deterministic flow of beta(t) gives
+        # to first order, and this flow only sets the leak-bias reference.
+        beta_flow = (np.asarray(beta_np).mean(axis=0)
+                     if np.asarray(beta_np).ndim == 3 else beta_np)
+        phi_fwd = jnp.asarray(drift_mod.flow_map(barycenters, beta_flow, sign=+1.0,
                                                   inside_body=inside_body))
-        phi_bwd = jnp.asarray(drift_mod.flow_map(barycenters, beta_np, sign=-1.0,
+        phi_bwd = jnp.asarray(drift_mod.flow_map(barycenters, beta_flow, sign=-1.0,
                                                   inside_body=inside_body))
         T_jx, S_jx, den_T_jx, den_S_jx, bias_T_jx, bias_S_jx = \
             compute_sb_barycentric_maps_drift(f, g, gamma_sb, mesh, beta_ipfp,
-                                              phi_fwd, phi_bwd, n_steps)
+                                              phi_fwd, phi_bwd, n_steps,
+                                              gate_to_flow=gate_to_flow)
     else:
         T_jx, S_jx, den_T_jx, den_S_jx, bias_T_jx, bias_S_jx = \
             compute_sb_barycentric_maps(f, g, gamma_sb, mesh, n_steps)
@@ -1797,6 +2332,7 @@ def run_mach_interpolation_case(
     # ── Error vs. high-resolution reference ───────────────────────────────────
     err_dict = None
     aero_dict = None
+    transport_dict = None
     if ref_bundle_paths and len(ref_bundle_paths) == 9:
         print("  Computing interpolation error vs. reference solutions …")
         err_dict = compute_interpolation_error(
@@ -1807,6 +2343,9 @@ def run_mach_interpolation_case(
         aero_dict = compute_aero_coefficients(
             t_array, press_dict, ref_bundle_paths, mesh, output_dir,
             gamma_gas=drift_gamma_gas)
+        transport_dict = compute_transport_metrics(
+            t_array, methods_dict, ref_bundle_paths, mesh,
+            band_pct=metric_band_pct, gamma_g=drift_gamma_gas)
     else:
         print("  (no ref_bundle_paths provided — skipping ground-truth error)")
 
@@ -1865,11 +2404,29 @@ def run_mach_interpolation_case(
             "compute_w2": bool(compute_w2), "wass_gamma": float(wass_gamma),
             "wass_iter": int(wass_iter),
             "mach0_inlet": mach0_inlet, "mach1_inlet": mach1_inlet,
+            "aoa_deg": float(aoa_deg), "aoa0_deg": float(aoa0),
+            "aoa1_deg": float(aoa1), "interp_axis": interp_axis,
         },
         "drift": {
             "use_drift": bool(use_drift),
             "beta_max": float(beta_max) if use_drift else 0.0,
             "peclet_max": float(pe_max) if use_drift else 0.0,
+            "bootstrap": bool(bootstrap_drift),
+            "bootstrap_smooth": bool(drift_bootstrap_smooth) if bootstrap_drift else None,
+            "bootstrap_nt": int(nt_boot) if bootstrap_exact else None,
+            "bootstrap_seed": (drift_bootstrap_seed or "null") if bootstrap_drift else None,
+            "bootstrap_start_gamma": (float(drift_bootstrap_start_gamma)
+                                      if bootstrap_drift else None),
+            "bootstrap_t_clip": (float(drift_bootstrap_t_clip)
+                                 if bootstrap_exact else None),
+            "bootstrap_mask": bool(drift_bootstrap_mask) if bootstrap_drift else None,
+            "bootstrap_mask_pct": float(drift_bootstrap_mask_pct) if bootstrap_drift else None,
+            # ‖β_k − β_{k−1}‖_L²(dx) down the ladder.  Decay ⇒ the self-conditioned
+            # drift is converging to its fixed point; growth/plateau ⇒ it is not.
+            "beta_delta_history": [s.get("beta_delta") for s in ipfp_stages
+                                   if "beta_delta" in s] or None,
+            # FFD ran only to populate the γ-independent control interpolator.
+            "ffd_control_only": bool(want_ffd_control and reference_drift != "ffd"),
         },
         "ipfp": {
             "stages": ipfp_stages,
@@ -1917,8 +2474,34 @@ def run_mach_interpolation_case(
         # C_D/C_L per method at t=0.1..0.9 plus the reference values they are
         # measured against — the scalar, physics-level counterpart to "errors".
         "aero": aero_dict,
+        # Shock placement / sharpness / admissibility — the metrics that isolate
+        # transport, unlike the domain-wide norms (68% freestream) and the wall
+        # integrals (where true transport is the identity).
+        "transport": transport_dict,
         "t_ref": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9] if err_dict else None,
     }
+    # ── Persist the reconstructed fields for post-processing ────────────────
+    # metrics.json carries only scalars, so animations, side-by-side comparison
+    # and shock-locus overlays have nothing to work from once a run ends — the
+    # per-frame PNGs are the only record, and they cannot be re-plotted on a
+    # shared colour scale or re-analysed.  float32 is ample for both (Mach ~2.0-2.5,
+    # pressure ~0.7-1.3): 2.7 MB at h0.025, 10.7 MB at h0.0125.
+    if save_fields:
+        _f = os.path.join(output_dir, "fields.npz")
+        np.savez_compressed(
+            _f,
+            t=np.asarray(t_array, dtype=np.float32),
+            method_names=np.array(list(methods_dict.keys())),
+            mach=np.stack([np.asarray(v, dtype=np.float32)
+                           for v in methods_dict.values()]),
+            press=np.stack([np.asarray(press_dict[k], dtype=np.float32)
+                            for k in methods_dict]),
+            mach0=np.asarray(mach0, dtype=np.float32),
+            mach1=np.asarray(mach1, dtype=np.float32),
+            barycenter=np.asarray(mesh.barycenter, dtype=np.float32),
+        )
+        print(f"    fields.npz written ({os.path.getsize(_f)/1e6:.1f} MB)")
+
     with open(os.path.join(output_dir, "metrics.json"), "w") as fh:
         _json.dump(metrics, fh, indent=1)
     print(f"    metrics.json written")
