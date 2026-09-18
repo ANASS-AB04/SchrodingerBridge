@@ -1,12 +1,12 @@
-# Cas test: "bump" | "diamond"
-case = "bump"
+# Cas test: "bump" | "diamond" | "naca0012"
+case = "diamond"
 
 # Physique
 rho_inf = 1.0
 p_inf = 1.0
-Mach = 2.10
+Mach = 1.2
 gamma = 1.4
-aoa = 0.0
+aoa = 2.0
 
 # Solveur
 # time_scheme: "EE" | "RK2" | "RK4" | "SRK2" | "SSP_RK2"
@@ -17,11 +17,21 @@ flux = "HLLC"
 reconstruction = "MUSCL"
 CFL = 0.6
 tf = 4.0
-stationarity_threshold = 2e-6
-stationarity_check_every = 100
+stationarity_threshold = 1e-6
+stationarity_check_every = 10000 
 
-# Maillage
-mesh_path = "meshes/bump/bump_h0.025.npy"
+# Maillage (doit correspondre au case)
+mesh_path = "meshes/diamond/diamond_h0.05.npy"
+
+
+# Sponge layer, pinned explicitly.  helper.get_sponge_source's own defaults
+# changed (width 0.15->0.20 Ly, strength 0.5->1.0) when Euler/ was synced from
+# EulerSR.  The sponge is subtracted from every flux, so leaving it to a library
+# default means a dependency bump silently changes every solution -- and the ~700
+# existing bundles would no longer be comparable to new ones.  These are the
+# values every snapshot on disk was computed with.
+sponge_width_frac    = 0.15   # of Ly
+sponge_strength_frac = 0.5    # of (U_inf + a_inf) / width
 
 [export]
 # results: true/false

@@ -114,6 +114,17 @@ drift_bootstrap_t_clip = 0.2
 # h0.0125.  Set false if disk is tight.
 save_fields = true
 
+# Persist a CONSERVED warm-start state W = [ρ, ρu, ρv, E] per method per frame to
+# warmstart.npz, for seeding the Euler solver instead of a uniform freestream.
+# fields.npz carries only Mach and pressure — 2 of the 4 degrees of freedom, so ρ
+# and the velocity direction are missing and no solver can be initialised from it.
+# This pushes the whole primitive vector through the SAME transport maps (no extra
+# bridge solve) and assembles W.  Also writes maps.npz (T/S), which otherwise die
+# with the process.
+# OFF by default: ~21 MB at h0.025 (3 methods × 11 frames × N × 4 × f64), ~4× at
+# h0.0125, and only the warm-start benchmark needs it.
+save_warmstart = false
+
 drift_bootstrap_mask     = true
 drift_bootstrap_mask_pct = 50.0
 
@@ -133,6 +144,15 @@ num_iter   = 1000          # Anderson IPFP iteration cap
 anderson_m = 5              # Anderson acceleration memory window (0 = plain Sinkhorn)
 debug_ipfp = false          # true → run the plain-Sinkhorn calibration tool instead of the pipeline
 ipfp_cfl   = 0.5           # CFL for the FVM heat solve inside IPFP (SSP-RK2 stable up to 1.0)
+# Percentile of the cell-size distribution that sets the explicit timestep.
+# 10 ignores the smallest 10% of cells -- fine when the mesh is fairly uniform
+# (diamond exceeds its stability limit by only 2.7x there and SSP-RK2 absorbs
+# it), but an airfoil's sharp trailing edge gives a 4.5x cell-size spread, so
+# those cells run 19.9x past the limit and every IPFP residual comes back NaN.
+# Use 0 (the true minimum) for airfoils; n_steps then grows as (dx10/dx0)^2, so
+# pay for it by starting gamma_sb_schedule lower -- n_steps is PROPORTIONAL to
+# gamma, so a ladder from 0.01 costs less than the diamond's from 0.5.
+cfl_pct    = 10
 # IPFP stopping tolerance on the L∞ potential increment max|f_new − f|.  This is
 # an UNNORMALISED max over N cells, so a finer mesh samples the shock and the
 # wedge corner more densely and reports a larger residual for the same physical

@@ -68,8 +68,10 @@ uv run python slurm/run_euler_grid.py \
 
 ### Mesh Generation
 ```bash
-uv run python Euler/bump.py      # generates meshes/bump/bump_h*.npy
-uv run python Euler/diamond.py   # generates meshes/diamond/diamond_h*.npy
+uv run python Euler/generate_mesh.py --geom diamond -h 0.025 --out-dir meshes/diamond
+uv run python Euler/generate_mesh.py --geom naca0012 -h 0.025 --nose-factor 7 --out-dir meshes/naca0012
+                         # -> naca0012_h0.025le7{,_solver}.npy: see "Rounded-LE airfoils" below
+# without --out-dir, meshes go to data/meshes/; the grid sbatch generates on demand
 ```
 
 ### Schrödinger Bridge Interpolation
@@ -179,6 +181,30 @@ the analysis root path the two cases never pool:
 ```bash
 uv run python SB/sweep_analysis.py --root outputs/Mach_interpolation/bump/iso/hessian
 ```
+
+**Rounded-LE airfoils need a nose-refined tag** (`H_TAG=h0.025le7`). A rounded
+leading edge carries a *detached* bow shock whose standoff is 0.01–0.04 chord; at
+plain h0.025 it spans 1.3–5 cells, the captured shock snaps between cell rows as Mach
+varies, and the reference C_D/C_L show a sawtooth (naca0012: +7–18% jumps at M1.69,
+2.04, 2.81; C_L ≠ 0 at AoA 0). The diamond (sharp LE) and bump are unaffected. The
+`le<N>` tag fixes it **without touching SB**:
+- `generate_mesh.py --nose-factor N` writes `<case>_h0.025leN.npy` — the standard mesh,
+  cell-for-cell, plus an `h_tag` — and `<case>_h0.025leN_solver.npy`, a *nested*
+  longest-edge bisection of it refined to h/N within 0.06 chord of the LE (wall
+  midpoints projected onto the true contour; child→parent map in its metadata).
+- `Euler/main.py` sees `solver_mesh` in the metadata (`config.load_solver_mesh`),
+  solves on the fine mesh, and exports the bundle on the standard mesh as the
+  area-weighted average of the conserved variables over each cell's children.
+  Untouched cells come back unchanged.
+- SB therefore runs on the standard mesh at unchanged cost. This is the point: SB's
+  explicit kernel sizes dt on the smallest cell, so running it on a nose-refined mesh
+  would cost ~21× per run (le10). Euler pays ~7× per solve instead (le7).
+- The tag keeps the corpora apart: bundles go to `results/<case>/h0.025leN/`
+  (`format_h` returns `h_tag`), SB output to `…/eig/h0.025leN/`, and the analysis labels
+  those runs `hmode = eig_leN`, so they never pool with plain `eig` at the same h.
+  Analyse with `interval_analysis.py --hmode eig_le7`.
+- Never regenerate a variant under a plain tag: the sbatch stale-check would quarantine
+  every existing bundle of that tag (different `n_cells`) and re-solve it.
 
 **Chunking.** Both scripts pack several runs per array task (`CHUNK`, default 8 for
 Euler and 12 for SB). This is not only for startup amortisation: the cluster enforces

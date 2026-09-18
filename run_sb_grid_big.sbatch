@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=sb-big
-#SBATCH --partition=gpu-h100,gpu-l40,gpu-a40
+# L40 first (fastest usually-available), then H100, then A40.  NOT rtx6000:
+# an SB task is CHUNK sequential runs of several minutes each, so a slow GPU
+# costs hours per task -- unlike HR generation, where the rtx6000s are fine.
+#SBATCH --partition=gpu-l40,gpu-h100,gpu-a40
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
@@ -74,6 +77,11 @@ module purge
 export PATH="$HOME/.local/bin:$PATH"
 export LD_LIBRARY_PATH=""
 export MPLBACKEND=Agg
+# Unbuffered stdout: python block-buffers when redirected to a file, so a
+# long-running task shows nothing in its log for many minutes and cannot be
+# monitored -- which matters here because the failure mode we care about
+# (NaN residuals) is visible in the first stage line or not at all.
+export PYTHONUNBUFFERED=1
 export JAX_ENABLE_X64=true
 export JAX_PLATFORM_NAME=gpu
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
@@ -87,7 +95,7 @@ rm -rf "$JAX_CACHE_ROOT"; mkdir -p "$JAX_CACHE_ROOT"
 export JAX_ENABLE_COMPILATION_CACHE=true
 export JAX_COMPILATION_CACHE_DIR="$JAX_CACHE_ROOT"
 
-CASE=${CASE:-diamond}                       # diamond | bump
+CASE=${CASE:-diamond}   # diamond | bump | naca0012 | naca2412 | rae2822 | oneraD | oa209
 H_TAG=${H_TAG:-h0.025}
 HMODE=${HMODE:-eig}
 FIXED_MACH=$(LC_ALL=C printf "%.2f" "${FIXED_MACH:-2.00}")
@@ -97,7 +105,7 @@ M_START=${M_START:-0.80};  M_STOP=${M_STOP:-3.00};  M_WIDTH=${M_WIDTH:-0.10}
 # `oblique` is the analytic theta-beta-M wedge solution, which describes the
 # diamond's leading edge and has no counterpart on a channel-wall bump.  Both
 # defaults therefore change with the case rather than being silently wrong.
-if [[ "$CASE" == "bump" ]]; then
+if [[ "$CASE" == "bump" ]]; then          # no incidence on a channel-wall bump
     read -r -a MACH_AXIS_AOAS <<< "${MACH_AXIS_AOAS:-0.00}"
     read -r -a AOA_PAIRS <<< "${AOA_PAIRS:-}"
 else
@@ -108,10 +116,14 @@ fi
 # DRIFTS entries may be composite: <reference_drift>+<seed>, e.g.
 #   SBsquared_exact+ffd = exact time-dependent bootstrap SEEDED by the FFD
 #   registration, held fixed until gamma < BOOT_SWITCH, then self-refining.
-if [[ "$CASE" == "bump" ]]; then
-    read -r -a DRIFTS <<< "${DRIFTS:-null ffd SBsquared_exact+ffd}"
-else
+# `oblique` is the analytic theta-beta-M solution for a WEDGE.  It describes the
+# diamond's leading edge and nothing else -- not the bump, not a rounded airfoil
+# leading edge -- so it is dropped for every other geometry rather than being
+# fitted to a body it does not model.
+if [[ "$CASE" == "diamond" ]]; then
     read -r -a DRIFTS <<< "${DRIFTS:-null oblique ffd SBsquared_exact+ffd}"
+else
+    read -r -a DRIFTS <<< "${DRIFTS:-null ffd SBsquared_exact+ffd}"
 fi
 BOOT_SWITCH=${BOOT_SWITCH:-0.001}
 # beta(t) endpoint clip for the exact mode — t=1 is singular (Q_0 = identity, so
@@ -120,9 +132,50 @@ BOOT_TCLIP=${BOOT_TCLIP:-0.2}
 # Runs PER TASK.  The cluster caps submitted jobs per user, so 576 one-run
 # tasks trip QOSMaxSubmitJobPerUserLimit; 12 per task makes it 48 tasks.
 CHUNK=${CHUNK:-12}
+# W2 is the OPTIONAL metric and, with cfl_pct=0, by far the most expensive thing
+# in a run: wass_gamma=0.005 at dx_min=6.8e-4 needs 21 626 steps per semigroup
+# solve, and there are 63 Sinkhorn calls x 50 iterations x 2 solves = 136M steps
+# ~= 69 min/run on an A40, against ~11 min for the bridge itself.  That is 86% of
+# the cost for a column L2/L-inf already rank the same way, so it is off by
+# default on the meshes that need cfl_pct=0.
+if [[ "$CASE" == "diamond" || "$CASE" == "bump" ]]; then
+    W2=${W2:-true}
+else
+    W2=${W2:-false}
+fi
 
-LADDER=(0.5 0.2 0.1 0.05 0.02 0.01 0.005 0.002 0.001 0.0005 0.0002 0.0001)
-read -r -a GIDXS <<< "${GIDXS:-5 8 11}"
+# The gamma ladder.  n_steps is PROPORTIONAL to gamma (dt <= CFL*dx^2/gamma, so
+# n = t*gamma/(CFL*dx^2)), which is what makes trimming the head of the ladder
+# the way to pay for a stricter CFL percentile:
+#     gamma=0.5  -> 108606 steps      gamma=0.05 -> 10861
+#     gamma=0.2  ->  43443            gamma=0.01 ->  2173      (naca0012 h0.025)
+# LADDER_START drops the leading rungs.  Defaults: the full ladder for the
+# near-uniform diamond/bump meshes, and 0.05 for airfoils, whose sharp trailing
+# edge forces CFL_PCT=0 and would otherwise cost 20x more per stage.
+FULL_LADDER=(0.5 0.2 0.1 0.05 0.02 0.01 0.005 0.002 0.001 0.0005 0.0002 0.0001)
+if [[ "$CASE" == "diamond" || "$CASE" == "bump" ]]; then
+    LADDER_START=${LADDER_START:-0.5};  CFL_PCT=${CFL_PCT:-10}
+else
+    # Airfoils: dx_min/dx_ref ~ 4.5, so pct=10 runs the smallest cells ~20x past
+    # their explicit stability limit -> residuals go NaN and IPFP burns its full
+    # iteration cap at every stage (measured: 7505 s for ONE stage at gamma=0.5).
+    # 0.02 is chosen so the per-stage cost MATCHES the diamond configuration that
+    # is known to work: 86 389 steps at pct=0 vs the diamond's 89 300 at gamma=0.5
+    # (0.97x).  Starting at 0.05 would be 2.4x that; 0.1 would be 4.8x.
+    LADDER_START=${LADDER_START:-0.02};  CFL_PCT=${CFL_PCT:-0}
+fi
+LADDER=()
+_seen_start=0
+for _g in "${FULL_LADDER[@]}"; do
+    [[ "$_g" == "$LADDER_START" ]] && _seen_start=1
+    (( _seen_start )) && LADDER+=("$_g")
+done
+if [[ ${#LADDER[@]} -eq 0 ]]; then
+    echo "[FAIL] LADDER_START=${LADDER_START} is not a rung of ${FULL_LADDER[*]}"; exit 1
+fi
+# GIDXS indexes the TRIMMED ladder, so the defaults track its new length.
+_NL=${#LADDER[@]}
+read -r -a GIDXS <<< "${GIDXS:-$((_NL-7)) $((_NL-4)) $((_NL-1))}"
 
 # ── Build the pair list in a STABLE order ───────────────────────────────────
 # Encoding: "M:<aoa>:<m0>:<m1>"  or  "A:<mach>:<a0>:<a1>".
@@ -208,7 +261,7 @@ fi
 # for this 5 deg half-wedge).  Ask beta_le directly rather than hardcoding a
 # threshold, so the guard follows the geometry.
 if [[ "$DRIFT" == oblique* && "$CASE" != "diamond" ]]; then
-    echo "  [skip] oblique drift is diamond-only (no wedge on a ${CASE})"
+    echo "  [skip] oblique is the analytic wedge solution — diamond only (case=${CASE})"
     return 0
 fi
 if [[ "$DRIFT" == oblique* ]]; then
@@ -282,7 +335,8 @@ sed -e "s|^case *= *\"diamond\"|case       = \"${CASE}\"|" \
     -e "s|^gamma_sb *= .*|gamma_sb = ${GMIN}|" \
     -e "s|^density_mode *= .*|density_mode = \"iso_hessian\"|" \
     -e "s|^hessian_mode *= .*|hessian_mode = \"${HMODE}\"|" \
-    -e "s|^compute_w2 *= .*|compute_w2 = true|" \
+    -e "s|^compute_w2 *= .*|compute_w2 = ${W2}|" \
+    -e "s|^cfl_pct *= .*|cfl_pct    = ${CFL_PCT}|" \
     "$BASE_CFG" > "$CFG"
 
     if SB_CONFIG="$CFG" uv run python SB/main.py; then

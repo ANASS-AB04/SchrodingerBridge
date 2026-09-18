@@ -163,9 +163,19 @@ def main():
     import jax
     devs = jax.devices()
     if not any(d.platform == "gpu" for d in devs):
-        print(f"ERROR: no GPU found — JAX is running on {devs[0].platform.upper()}. "
-              "Re-run without interrupting JAX startup (first ~3 s).")
-        raise SystemExit(1)
+        # SB_ALLOW_CPU exists so the pipeline can be SMOKE-TESTED without a GPU.
+        # Every code path after the bridge solve (W2, aero, transport metrics,
+        # metrics.json) is pure bookkeeping that a CPU run exercises identically
+        # -- and that is exactly where a stray NameError hides until it has
+        # burned a few hundred GPU-hours of otherwise-good runs.
+        if os.environ.get("SB_ALLOW_CPU") == "1":
+            print(f"[SB_ALLOW_CPU] running on {devs[0].platform.upper()} — "
+                  "smoke test only, results are not production.")
+        else:
+            print(f"ERROR: no GPU found — JAX is running on {devs[0].platform.upper()}. "
+                  "Re-run without interrupting JAX startup (first ~3 s).  Set "
+                  "SB_ALLOW_CPU=1 to smoke-test the pipeline on CPU.")
+            raise SystemExit(1)
 
     cfg  = _load_config()
     run  = cfg.get("run", {})
@@ -228,6 +238,7 @@ def main():
                 smooth_gamma=cmach.get("smooth_gamma", 0.1),
                 smooth_t=cmach.get("smooth_t", 0.005),
                 ipfp_cfl=cmach.get("ipfp_cfl", 0.8),
+                cfl_pct=cmach.get("cfl_pct", 10),
                 ipfp_tol=cmach.get("ipfp_tol", 1e-7),
                 mach0_inlet=case_cfg.get("mach0_inlet"),
                 mach1_inlet=case_cfg.get("mach1_inlet"),
@@ -250,6 +261,7 @@ def main():
                 gate_to_flow=cmach.get("gate_to_flow", True),
                 metric_band_pct=cmach.get("metric_band_pct", 95.0),
                 save_fields=cmach.get("save_fields", True),
+                save_warmstart=cmach.get("save_warmstart", False),
                 ffd_control=cmach.get("ffd_control", True),
             )
 

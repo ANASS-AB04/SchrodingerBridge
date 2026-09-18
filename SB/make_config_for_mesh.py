@@ -42,7 +42,17 @@ def find_bundle(results_dir: str, mach: str, aoa: str = "0.00",
     The filename convention is case-dependent: ``Euler/config.py`` prefixes the AoA
     only for diamond, so bump snapshots are ``M2.00_...`` with no ``AOA`` field.
     """
-    stem = f"AOA{aoa}_M{mach}" if case == "diamond" else f"M{mach}"
+    # Ask Euler itself how it names a snapshot rather than re-deriving the rule.
+    # The AoA prefix applies to diamond AND every airfoil (naca0012, rae2822,
+    # oneraD, ...) but not to bump; duplicating that list here would silently rot
+    # the moment a geometry is added upstream.
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "Euler"))
+        from config import format_condition_tag           # type: ignore
+        stem = format_condition_tag({"Mach": float(mach), "case": case,
+                                     "aoa": float(aoa)})
+    except Exception:                                      # noqa: BLE001
+        stem = f"AOA{aoa}_M{mach}" if case != "bump" else f"M{mach}"
     pattern = os.path.join(results_dir, f"{stem}_*.npz")
     hits = sorted(g for g in glob.glob(pattern) if "summary" not in os.path.basename(g))
     if not hits:
@@ -116,6 +126,23 @@ def main():
 
     with open(args.base) as fh:
         lines = fh.readlines()
+
+    # A geometry new to Config.toml has no [run.mach.<case>] block, and the
+    # rewrite below would report "0/4 keys" instead of doing anything useful.
+    # Clone the diamond block under the new name: every key it holds is
+    # overwritten just below anyway, so the clone only has to supply the shape.
+    if not any(ln.strip() == f"[run.mach.{args.case}]" for ln in lines):
+        src_hdr = "[run.mach.diamond]"
+        try:
+            i0 = next(i for i, ln in enumerate(lines) if ln.strip() == src_hdr)
+        except StopIteration:
+            raise SystemExit(f"ERROR: no {src_hdr} in {args.base} to clone from")
+        i1 = next((i for i in range(i0 + 1, len(lines))
+                   if lines[i].strip().startswith("[")
+                   and lines[i].strip().endswith("]")), len(lines))
+        block = [f"\n[run.mach.{args.case}]\n"] + lines[i0 + 1:i1]
+        lines = lines + block
+        print(f"  [new] cloned {src_hdr} -> [run.mach.{args.case}]", file=sys.stderr)
 
     # Only rewrite inside [run.mach.<case>].  The keys bundle0/bundle1/mesh/
     # ref_bundles appear identically in every case block, so a section-blind

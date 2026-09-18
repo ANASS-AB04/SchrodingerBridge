@@ -10,7 +10,7 @@ import time
 import jax_fvm.src.helper as helper # pyright: ignore[reportMissingImports]
 import matplotlib.pyplot as plt
 
-sys.modules.setdefault("jax_fvm.src.solvers.Euler.Euler", sys.modules[__name__])
+sys.modules.setdefault("jax_fvm.src.solvers.euler.euler", sys.modules[__name__])
 
 size = 11
 params = {

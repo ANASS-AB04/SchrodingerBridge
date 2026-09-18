@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=euler-big
-#SBATCH --partition=gpu-h100,gpu-l40,gpu-a40
+#SBATCH --partition=gpu-l40,gpu-rtx6000,gpu-h100,gpu-a40
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
@@ -51,6 +51,11 @@ module purge
 export PATH="$HOME/.local/bin:$PATH"
 export LD_LIBRARY_PATH=""
 export MPLBACKEND=Agg
+# Unbuffered stdout: python block-buffers when redirected to a file, so a
+# long-running task shows nothing in its log for many minutes and cannot be
+# monitored -- which matters here because the failure mode we care about
+# (NaN residuals) is visible in the first stage line or not at all.
+export PYTHONUNBUFFERED=1
 export JAX_PLATFORM_NAME=gpu
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-4}
@@ -66,7 +71,7 @@ rm -rf "$JAX_CACHE_ROOT"; mkdir -p "$JAX_CACHE_ROOT"
 export JAX_ENABLE_COMPILATION_CACHE=true
 export JAX_COMPILATION_CACHE_DIR="$JAX_CACHE_ROOT"
 
-CASE=${CASE:-diamond}                       # diamond | bump
+CASE=${CASE:-diamond}   # diamond | bump | naca0012 | naca2412 | rae2822 | oneraD | oa209
 H_TAG=${H_TAG:-h0.025}
 MESH="meshes/${CASE}/${CASE}_${H_TAG}.npy"
 FIXED_MACH=$(LC_ALL=C printf "%.2f" "${FIXED_MACH:-2.00}")
@@ -75,9 +80,9 @@ CHUNK=${CHUNK:-8}
 # Mach grid: start:stop:step, at 0.01 so every 0.10-wide pair gets its 9 refs.
 M_START=${M_START:-0.80};  M_STOP=${M_STOP:-3.00};  M_STEP=${M_STEP:-0.01}
 A_START=${A_START:-0.00};  A_STOP=${A_STOP:-4.00};  A_STEP=${A_STEP:-0.10}
-# Incidence is a DIAMOND-ONLY axis.  The bump is a bump on a channel wall, not
-# a free-flying body, and Euler/config.py:format_condition_tag does not even
-# put an AoA in its snapshot names -- so bump gets one AoA and no angle sweep.
+# The BUMP is the only geometry with no incidence: it sits on a channel wall,
+# and Euler/config.py:format_condition_tag omits the AoA from its snapshot names
+# accordingly.  diamond and every airfoil carry an AoA and get the full grid.
 if [[ "$CASE" == "bump" ]]; then
     read -r -a MACH_AXIS_AOAS <<< "${MACH_AXIS_AOAS:-0.00}"
     DO_AOA_AXIS=${DO_AOA_AXIS:-0}
@@ -130,6 +135,40 @@ if [[ "$ID" -ge "$N_TASKS" ]]; then
     echo "task $ID >= $N_TASKS — nothing to do"; exit 0
 fi
 
+# ── Mesh generation (once per task, only if absent) ─────────────────────────
+# The airfoils ship no pre-built meshes, and generate_mesh.py writes
+# <case>_h<h>.npy -- exactly the name this script expects.  Concurrent array
+# tasks may race here, so build into a private temp name and move atomically.
+if [[ ! -f "$MESH" ]]; then
+    echo "  [mesh] $MESH absent -> generating"
+    # Build into a temp dir ON THE SAME FILESYSTEM as the target.  The previous
+    # version staged in $SLURM_TMPDIR (node-local) and moved to meshes/ (NFS):
+    # a cross-device `mv` is copy-then-unlink, NOT atomic, so a concurrent task
+    # could load a half-written .npy and silently solve on a corrupt mesh.
+    # Within one filesystem, `mv` is a rename() and is atomic.
+    MESH_TMP="meshes/${CASE}/.tmp_${H_TAG}_${SLURM_ARRAY_TASK_ID:-0}_$$"
+    mkdir -p "$MESH_TMP"
+    # A nose-refined tag h<h>le<N> (rounded-LE airfoils) is the standard mesh plus
+    # a nested solver mesh refined to h/N at the leading edge: Euler solves on the
+    # latter and writes bundles on the former, so SB and its cost are unchanged.
+    H_NUM=${H_TAG#h};  NOSE_ARGS=()
+    if [[ "$H_NUM" == *le* ]]; then
+        NOSE_ARGS=(--nose-factor "${H_NUM#*le}");  H_NUM=${H_NUM%%le*}
+    fi
+    if uv run python Euler/generate_mesh.py --geom "$CASE" -h "$H_NUM" \
+            ${NOSE_ARGS[@]+"${NOSE_ARGS[@]}"} --out-dir "$MESH_TMP"; then
+        # `mv -n` so a task that lost the race does not clobber a good mesh.
+        # Solver mesh FIRST: the existence test above keys on $MESH, so a task
+        # that sees $MESH must also find the solver mesh it points to.
+        mv -n "$MESH_TMP"/*_solver.npy "meshes/${CASE}/" 2>/dev/null
+        mv -n "$MESH_TMP"/*.npy "meshes/${CASE}/" 2>/dev/null
+        rm -rf "$MESH_TMP"
+    else
+        echo "[FAIL] mesh generation for ${CASE} at ${H_TAG}"; exit 1
+    fi
+    [[ -f "$MESH" ]] || { echo "[FAIL] ${MESH} still missing after generation"; exit 1; }
+fi
+
 # ── Geometry guard (once per task, diamond only) ──────────────────────────────────────────
 # The fine meshes shipped before 2026-08 were the alpha=10 deg wedge while
 # h0.025 is alpha=5 deg; a study spanning both would compare two airfoils.
@@ -157,9 +196,10 @@ for (( i = START; i <= END; i++ )); do
     PAIR=${PAIRS[$i]}
     R_AOA=${PAIR%_*}
     R_MACH=${PAIR#*_}
-    # bump snapshots carry no AOA field (see format_condition_tag)
-    if [[ "$CASE" == "diamond" ]]; then STEM="AOA${R_AOA}_M${R_MACH}"
-    else                                STEM="M${R_MACH}"; fi
+    # Only bump omits the AoA field; diamond and all airfoils carry it.
+    # Mirrors Euler/config.py:format_condition_tag -- keep the two in step.
+    if [[ "$CASE" == "bump" ]]; then STEM="M${R_MACH}"
+    else                            STEM="AOA${R_AOA}_M${R_MACH}"; fi
 
     # Stale-bundle check: a bundle may exist but have been computed on a
     # DIFFERENT mesh at the same h_tag (exactly what the 10deg/5deg swap did).
@@ -202,7 +242,7 @@ PY
     # time.  For a study comparing snapshots across meshes that is fatal.
     # --aoa is a diamond-only flag; it is meaningless for the bump
     AOA_ARGS=()
-    [[ "$CASE" == "diamond" ]] && AOA_ARGS=(--aoa "${R_AOA}")
+    [[ "$CASE" != "bump" ]] && AOA_ARGS=(--aoa "${R_AOA}")
     if uv run python Euler/main.py \
             --case "$CASE" --mach "${R_MACH}" ${AOA_ARGS[@]+"${AOA_ARGS[@]}"} \
             --mesh-path "${MESH}" \

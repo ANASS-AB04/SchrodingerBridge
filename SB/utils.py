@@ -447,7 +447,7 @@ def _feature_density(mach_field):
 def compute_interpolation_error(t_array, methods_in,
                                 ref_bundle_paths, mesh, output_dir,
                                 wass_gamma=0.005, wass_iter=50,
-                                compute_w2=True):
+                                compute_w2=True, cfl_pct=10):
     """
     Compare interpolated Mach fields against high-resolution solver solutions
     at t = 0.1, 0.2, ..., 0.9 (ref_bundle_paths must be 9 paths in that order).
@@ -467,7 +467,7 @@ def compute_interpolation_error(t_array, methods_in,
     methods = list(methods_in.items())
     errors   = {name: {"l2": [], "linf": [], "w2": []} for name, _ in methods}
     abs_errs = {name: [] for name, _ in methods}
-    n_steps_w = heat_solver.compute_n_steps(mesh, wass_gamma, CFL=0.5)
+    n_steps_w = heat_solver.compute_n_steps(mesh, wass_gamma, CFL=0.5, pct=cfl_pct)
     if compute_w2:
         print(f"    Wasserstein W₂ on |M−M∞| density  (entropic, γ_w={wass_gamma}, "
               f"σ_w={np.sqrt(2*wass_gamma):.3f}, {n_steps_w} heat steps, "
@@ -613,8 +613,14 @@ def le_shock_geometry(mesh):
         cy = float(bary[:, 1].mean())
     chord = float(md.get("chord", 1.0) or 1.0)
     height = md.get("height")
+    # The wedge half-angle is only MEANINGFUL for the diamond.  Testing for a
+    # `height` key is not enough: the airfoils carry one too (it is their
+    # thickness), so naca0012 would report a 6.84 deg "wedge" and be scored
+    # against a theta-beta-M relation that does not describe a rounded leading
+    # edge at all -- a wrong number rather than a missing one.
+    is_wedge = str(md.get("case", "")).lower() == "diamond"
     alpha = (float(np.arctan(float(height) / max(chord, 1e-30)))
-             if height is not None else float("nan"))
+             if (is_wedge and height is not None) else float("nan"))
     return cx - 0.5 * chord, cy, alpha, chord
 
 
@@ -1371,6 +1377,13 @@ def reconstruct_mach_barycentric_cdi(t, T_map, S_map, barycenters,
     back to the UNDISPLACED endpoint value at the cell itself — i.e. the identity
     map locally — rather than to the nearest fluid cell to the garbage point (that
     nearest cell can sit on the wrong side of the airfoil).
+
+    The formula is field-agnostic — the field enters only as the interpolator
+    payload — so `mach0`/`mach1` may be either a scalar cell field `(N,)` or a
+    VECTOR one `(N,k)` (e.g. the four primitives, for a solver warm start).  In
+    the vector case the identity fallback is ATOMIC PER CELL: if any component of
+    a cell is bad the whole k-vector reverts together.  Mixing a transported ρ
+    with an undisplaced p would yield a state satisfying neither.
     """
     mach0 = np.asarray(mach0, dtype=float)
     mach1 = np.asarray(mach1, dtype=float)
@@ -1388,12 +1401,102 @@ def reconstruct_mach_barycentric_cdi(t, T_map, S_map, barycenters,
     M0 = np.asarray(interp0(W),  dtype=float)
     M1 = np.asarray(interp1(Tg), dtype=float)
 
-    bad0 = inside_body(W)  | ~np.isfinite(M0)
-    bad1 = inside_body(Tg) | ~np.isfinite(M1)
+    def _bad(values, pts):
+        # (N,) stays (N,); (N,k) reduces over components so the fallback is atomic
+        nan_mask = ~np.isfinite(values)
+        if nan_mask.ndim > 1:
+            nan_mask = nan_mask.any(axis=-1)
+        return inside_body(pts) | nan_mask
+
+    bad0 = _bad(M0, W)
+    bad1 = _bad(M1, Tg)
     M0[bad0] = mach0[bad0]                          # identity-map fallback
     M1[bad1] = mach1[bad1]
 
     return (1.0 - t) * M0 + t * M1
+
+
+def _assemble_conserved(prim_seq, gamma_gas, rho_floor, p_floor):
+    """(..., 4) primitives [ρ,u,v,p] → (..., 4) conserved [ρ, ρu, ρv, E].
+
+    Mirrors Euler/jax_fvm/src/helper.py:getConserved with M=1.0, so a state built
+    here is byte-comparable with one the solver would have built itself.
+
+    The CDI blend is not conservative and the components are transported
+    independently, so admissibility is not guaranteed even starting from
+    primitives.  Floors are applied — but every clamped cell is COUNTED and
+    returned, because a seed that needed repair on 3% of its cells is a different
+    object from a clean one and the speedup table has to be readable next to that
+    fact.  Assembling E from the floored ρ,p keeps E > ½ρ|V|² by construction.
+    """
+    prim_seq = np.asarray(prim_seq, dtype=float)
+    rho = prim_seq[..., 0]
+    u   = prim_seq[..., 1]
+    v   = prim_seq[..., 2]
+    p   = prim_seq[..., 3]
+
+    diag = {
+        "n_rho_clamped": int(np.count_nonzero(rho < rho_floor)),
+        "n_p_clamped":   int(np.count_nonzero(p   < p_floor)),
+        "n_cells_total": int(rho.size),
+        "rho_min_raw":   float(rho.min()),
+        "p_min_raw":     float(p.min()),
+    }
+
+    rho = np.maximum(rho, rho_floor)
+    p   = np.maximum(p,   p_floor)
+    E   = p / (gamma_gas - 1.0) + 0.5 * rho * (u * u + v * v)
+    return np.stack([rho, rho * u, rho * v, E], axis=-1), diag
+
+
+def _build_warmstart_states(t_array, prims0, prims1, barycenters,
+                            barycenter_delaunay, mesh,
+                            T_map, S_map, ffd_maps,
+                            inside_body, domain_lo, domain_hi,
+                            gamma_gas=1.4, floor_frac=1e-6):
+    """Conserved states W(t) per interpolation method, ready to seed the solver.
+
+    Returns (states, diagnostics) as dicts keyed in the SAME order as
+    `methods_dict` — BaryCDI, Linear, FFD — so `method_names` in warmstart.npz
+    lines up with the one in fields.npz.
+
+    One vector-valued interpolator pair serves all four primitive components
+    (scipy's LinearNDInterpolator takes (N,k) payloads natively), and it reuses
+    the already-built `barycenter_delaunay`: the Qhull triangulation is the
+    expensive part, not the interpolants.
+    """
+    prims0 = np.asarray(prims0, dtype=float)
+    prims1 = np.asarray(prims1, dtype=float)
+
+    interp0_W, interp1_W, _, _, _ = build_cdi_interpolators(
+        barycenters, prims0, prims1, barycenter_delaunay, mesh)
+
+    rho_floor = floor_frac * float(min(prims0[:, 0].min(), prims1[:, 0].min()))
+    p_floor   = floor_frac * float(min(prims0[:, 3].min(), prims1[:, 3].min()))
+
+    def _transport(T, S):
+        return np.stack([
+            reconstruct_mach_barycentric_cdi(
+                float(t_val), T, S, barycenters, prims0, prims1,
+                interp0_W, interp1_W, inside_body, domain_lo, domain_hi)
+            for t_val in t_array])
+
+    prim_by_method = {"BaryCDI": _transport(T_map, S_map)}
+    # Linear baseline: zero transport, the same (1−t)·f₀ + t·f₁ used for Mach.
+    prim_by_method["Linear"] = np.stack(
+        [(1.0 - t_val) * prims0 + t_val * prims1 for t_val in t_array])
+    if ffd_maps is not None:
+        prim_by_method["FFD"] = _transport(*ffd_maps)
+
+    states, diagnostics = {}, {}
+    for name, prim_seq in prim_by_method.items():
+        states[name], diagnostics[name] = _assemble_conserved(
+            prim_seq, gamma_gas, rho_floor, p_floor)
+        d = diagnostics[name]
+        print(f"    {name:8s} W: ρ_min={d['rho_min_raw']:.4e} p_min={d['p_min_raw']:.4e} "
+              f"clamped ρ/p = {d['n_rho_clamped']}/{d['n_p_clamped']} "
+              f"of {d['n_cells_total']}")
+    return states, diagnostics
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1730,7 +1833,7 @@ def run_mach_interpolation_case(
         hessian_lp=2.0, hessian_mode="det",
         field_source="pert_mach", field_floor_pct=50.0,
         smooth_heat=True, smooth_gamma=0.1, smooth_t=0.005,
-        ipfp_cfl=0.8, ipfp_tol=1e-7,
+        ipfp_cfl=0.8, ipfp_tol=1e-7, cfl_pct=10,
         mach0_inlet=None, mach1_inlet=None,
         compute_w2=True, wass_gamma=0.005, wass_iter=50,
         reference_drift="null", drift_sigma_w=0.2,
@@ -1740,7 +1843,7 @@ def run_mach_interpolation_case(
         drift_bootstrap_t_clip=0.2,
         drift_bootstrap_mask=True, drift_bootstrap_mask_pct=50.0,
         gate_to_flow=True, ffd_control=True, metric_band_pct=95.0,
-        save_fields=True):
+        save_fields=True, save_warmstart=False):
     os.makedirs(output_dir, exist_ok=True)
     print(f"\n{'─'*55}\n  Mach SB-CDI Interpolation\n{'─'*55}")
  
@@ -1791,8 +1894,10 @@ def run_mach_interpolation_case(
                        filename=os.path.join(output_dir, "Mach_M1_contours.png"), levels=6)
  
     # ── [3] n_steps ───────────────────────────────────────────────────────────
-    n_steps        = heat_solver.compute_n_steps(mesh, gamma_sb, CFL=ipfp_cfl)
-    n_steps_smooth = heat_solver.compute_n_steps(mesh, smooth_gamma, t_target=smooth_t, CFL=ipfp_cfl)
+    n_steps        = heat_solver.compute_n_steps(mesh, gamma_sb, CFL=ipfp_cfl,
+                                                 pct=cfl_pct)
+    n_steps_smooth = heat_solver.compute_n_steps(mesh, smooth_gamma, t_target=smooth_t,
+                                                 CFL=ipfp_cfl, pct=cfl_pct)
     sigma_smooth   = np.sqrt(2 * smooth_gamma * smooth_t)
     print(f"    FVM steps / IPFP solve:    {n_steps}")
     print(f"    FVM steps / density smooth: {n_steps_smooth}  "
@@ -1947,8 +2052,9 @@ def run_mach_interpolation_case(
     def _n_steps_ipfp(gk, drifted, bmax):
         if drifted:
             return advdiff_solver.compute_n_steps_advdiff(
-                mesh, gk, bmax, CFL_diff=ipfp_cfl, CFL_adv=drift_cfl_adv)
-        return heat_solver.compute_n_steps(mesh, gk, CFL=ipfp_cfl)
+                mesh, gk, bmax, CFL_diff=ipfp_cfl, CFL_adv=drift_cfl_adv,
+                pct=cfl_pct)
+        return heat_solver.compute_n_steps(mesh, gk, CFL=ipfp_cfl, pct=cfl_pct)
 
     if bootstrap_drift and len(schedule) < 2:
         print(f"    [WARN] reference_drift='{reference_drift}' needs at least TWO γ stages "
@@ -2329,6 +2435,39 @@ def run_mach_interpolation_case(
                 interp0_p, interp1_p, inside_body_cdi, domain_lo_cdi, domain_hi_cdi)
             for t_val in t_array])
 
+    # ── Conserved warm-start state (for seeding the Euler solver) ──────────────
+    # Mach + pressure is only 2 of the 4 degrees of freedom: ρ is unknown and the
+    # velocity DIRECTION is gone, so a solver cannot be initialised from them.
+    # Push the whole primitive vector (ρ,u,v,p) through the SAME maps instead and
+    # assemble W.  Same cost argument as pressure — the maps are geometric, so
+    # this is one more interpolation pass and no extra bridge solve.
+    #
+    # PRIMITIVES, not conservatives (which sit unread in every bundle).  The
+    # decisive reason is the FREESTREAM, measured on the M2.00/M2.50 diamond
+    # bundles at t=0.5 over the 51% of cells that are undisturbed in both:
+    #     primitive blend    → p error 5.2e-04   (bundle discretisation noise)
+    #     conservative blend → p error 1.8e-02   (+1.75% systematic)
+    # Freestream is linear in M in PRIMITIVE variables (ρ=1, p=1, u=M√γ), so a
+    # primitive blend reproduces the target freestream exactly; a conservative
+    # blend carries an energy defect ½t(1−t)(u₁−u₀)², leaving the seed at local
+    # Mach 2.231 instead of 2.250.  The Dirichlet BC (kw["value"]=inlet) and the
+    # sponge both target p=1, so a conservative seed would fight them across half
+    # the domain — a pure seeding artefact that could erase the very speedup this
+    # is built to measure.
+    # Secondary reason: the CDI blend is a convex combination of SAMPLED values,
+    # so ρ>0 and p>0 are inherited from positive endpoints, whereas blending ρ
+    # and E independently can produce E < ½ρ|V|² from positive inputs.  Measured
+    # on real data: zero clamps fire over 11 frames × 3 methods × 20190 cells.
+    warmstart_dict = None
+    warmstart_diag = None
+    if save_warmstart:
+        print("  Reconstructing CDI conserved state (solver warm start) …")
+        warmstart_dict, warmstart_diag = _build_warmstart_states(
+            t_array, prims0, prims1, barycenters, barycenter_delaunay, mesh,
+            T_map, S_map, ffd_maps,
+            inside_body_cdi, domain_lo_cdi, domain_hi_cdi,
+            gamma_gas=drift_gamma_gas)
+
     # ── Error vs. high-resolution reference ───────────────────────────────────
     err_dict = None
     aero_dict = None
@@ -2339,7 +2478,7 @@ def run_mach_interpolation_case(
             t_array, methods_dict,
             ref_bundle_paths, mesh, output_dir,
             wass_gamma=wass_gamma, wass_iter=wass_iter,
-            compute_w2=compute_w2)
+            compute_w2=compute_w2, cfl_pct=cfl_pct)
         aero_dict = compute_aero_coefficients(
             t_array, press_dict, ref_bundle_paths, mesh, output_dir,
             gamma_gas=drift_gamma_gas)
@@ -2478,6 +2617,11 @@ def run_mach_interpolation_case(
         # transport, unlike the domain-wide norms (68% freestream) and the wall
         # integrals (where true transport is the identity).
         "transport": transport_dict,
+        # Per-method admissibility of the conserved warm-start state: how many
+        # cells needed a positivity floor.  Kept beside the error tables so a
+        # solver speedup is never read without knowing whether its seed was
+        # clean.  None when save_warmstart is off.
+        "warmstart": warmstart_diag,
         "t_ref": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9] if err_dict else None,
     }
     # ── Persist the reconstructed fields for post-processing ────────────────
@@ -2501,6 +2645,44 @@ def run_mach_interpolation_case(
             barycenter=np.asarray(mesh.barycenter, dtype=np.float32),
         )
         print(f"    fields.npz written ({os.path.getsize(_f)/1e6:.1f} MB)")
+
+    # ── Persist the conserved warm-start states + the transport maps ────────
+    # float64 here, unlike fields.npz: this is solver input, not a plot.
+    # maps.npz is cheap insurance — T/S otherwise die with the process (only the
+    # FFD registration is cached), so transporting any FUTURE field through the
+    # SB map would mean re-running the whole γ-annealed IPFP.
+    if save_warmstart and warmstart_dict is not None:
+        _w = os.path.join(output_dir, "warmstart.npz")
+        _m_names = list(warmstart_dict.keys())
+        _t = np.asarray(t_array, dtype=np.float64)
+        _m0 = float(mach0_inlet) if mach0_inlet is not None else float("nan")
+        _m1 = float(mach1_inlet) if mach1_inlet is not None else float("nan")
+        np.savez_compressed(
+            _w,
+            t=_t,
+            method_names=np.array(_m_names),
+            conservatives=np.stack([warmstart_dict[k] for k in _m_names]),
+            # target freestream at each frame — linear in t by construction, and
+            # for the diamond 2.00→2.50 pair these land exactly on the 9 refs
+            mach_target=(1.0 - _t) * _m0 + _t * _m1,
+            aoa_target=(1.0 - _t) * float(aoa0) + _t * float(aoa1),
+            gamma_gas=np.asarray([float(drift_gamma_gas)]),
+            mesh_path=np.asarray([str(mesh_path)]),
+            n_cells=np.asarray([int(N_cells)]),
+            barycenter=np.asarray(mesh.barycenter, dtype=np.float64),
+        )
+        print(f"    warmstart.npz written ({os.path.getsize(_w)/1e6:.1f} MB)")
+
+        _mp = os.path.join(output_dir, "maps.npz")
+        _maps = {"BaryCDI_T": T_map, "BaryCDI_S": S_map}
+        if ffd_maps is not None:
+            _maps["FFD_T"], _maps["FFD_S"] = ffd_maps
+        np.savez_compressed(
+            _mp,
+            barycenter=np.asarray(mesh.barycenter, dtype=np.float64),
+            **{k: np.asarray(v, dtype=np.float64) for k, v in _maps.items()},
+        )
+        print(f"    maps.npz written ({os.path.getsize(_mp)/1e6:.1f} MB)")
 
     with open(os.path.join(output_dir, "metrics.json"), "w") as fh:
         _json.dump(metrics, fh, indent=1)

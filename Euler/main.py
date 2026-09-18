@@ -3,17 +3,26 @@ import jax
 import numpy as np
 import jax.numpy as jnp
 import jax_fvm.src.helper as helper
-import jax_fvm.src.euler_solver as Euler
+import jax_fvm.src.euler_solver as euler
 from graph import export_graph
 import time
 
 try:
-    from config import build_config_from_cli, load_default_config, load_mesh, print_config, setup_dirs
-    from utils import build_run_summary, export_snapshot, export_run_summary, format_snapshot_name
+    from config import build_config_from_cli, load_default_config, load_mesh, load_solver_mesh, print_config, setup_dirs
+    from utils import average_to_parent, build_run_summary, export_snapshot, export_run_summary, format_snapshot_name
+    from warmstart import load_init_state
 except ModuleNotFoundError:
-    from Euler.config import build_config_from_cli, load_default_config, load_mesh, print_config, setup_dirs
-    from Euler.utils import build_run_summary, export_snapshot, export_run_summary, format_snapshot_name
+    from euler.config import build_config_from_cli, load_default_config, load_mesh, load_solver_mesh, print_config, setup_dirs
+    from euler.utils import average_to_parent, build_run_summary, export_snapshot, export_run_summary, format_snapshot_name
+    from euler.warmstart import load_init_state
 
+"""
+Script principal pour la résolution numérique d'Euler compressible sur les cas tests prédéfinis (diamond, bump) via la méthodes des volumes finis. Le script est configuré via un fichier TOML (euler/config.toml) ou bien via arguments CLI. Différentes options de schémas temporels, flux numériques, reconstruction spatiale, exports, etc... sont disponibles. 
+
+Usage :
+    uv run python euler/main.py (si config.toml est correctement configuré)
+    uv run python euler/main.py --case diamond --Mach 2.5 --aoa 5 --tf 0.5 --flux HLLC --reconstruction MUSCL --time_scheme RK2
+"""
 
 CFG = load_default_config()
 
@@ -22,7 +31,7 @@ def initialize(mesh, cfg):
     rho_inf, p_inf = cfg["rho_inf"], cfg["p_inf"]
     gamma, Mach = cfg["gamma"], cfg["Mach"]
     c_inf = (gamma * p_inf / rho_inf) ** 0.5
-    aoa_deg = float(cfg.get("aoa", 0.0)) if cfg.get("case") == "diamond" else 0.0
+    aoa_deg = float(cfg.get("aoa", 0.0)) if str(cfg.get("case", "")).lower() in ("diamond", "naca0012", "naca2412", "rae2822", "onerad", "oa209") else 0.0
     aoa_rad = jnp.deg2rad(jnp.asarray(aoa_deg))
     u_inf = Mach * c_inf * jnp.cos(aoa_rad)
     v_inf = Mach * c_inf * jnp.sin(aoa_rad)
@@ -32,27 +41,65 @@ def initialize(mesh, cfg):
     return W, inlet
 
 
-def run(W, mesh, inlet, cfg, out_dirs):
-    # Résolution numérique d'Euler compressible
-    W_initial = W
+def run(W, mesh, inlet, cfg, out_dirs, export_mesh=None, parent=None,
+        W_freestream=None):
+    # export_mesh/parent: solve on a nested solver mesh (`mesh`) but write the
+    # snapshot on its parent `export_mesh` -- see config.load_solver_mesh.
+    # W_freestream: the uniform state initialize() would have produced.  Only set
+    # when W is a warm start; it keeps the entropy-creation diagnostic and the
+    # timestep referenced to freestream rather than to the seed.
+    # Résolution numérique d'euler compressible
+    verbose = bool(cfg.get("verbose", True))
+    # delta_S must stay "entropy created relative to freestream", or a warm-started
+    # run's deltaS silently means something else and stops being comparable to the
+    # ~700 bundles already on disk.
+    W_initial = W if W_freestream is None else W_freestream
 
     # Schéma en temps
     scheme = str(cfg["time_scheme"]).upper()
-    fn = {"EE": Euler.time_step_Euler, "RK2": Euler.time_step_RK2, "RK4": Euler.time_step_RK4,
-          "SRK2": Euler.time_step_RK2_SSP, "SSP_RK2": Euler.time_step_RK2_SSP}[scheme]
+    fn = {"EE": euler.time_step_Euler, "RK2": euler.time_step_RK2, "RK4": euler.time_step_RK4,
+          "SRK2": euler.time_step_RK2_SSP, "SSP_RK2": euler.time_step_RK2_SSP}[scheme]
 
     # kwargs pour le solver (flux, reconstruction, etc...)
     kw = dict(gamma=cfg["gamma"], M=1.0, reconstruction=cfg["reconstruction"],
               flux=cfg["flux"], value=inlet, entropy=False)
+    # Sponge geometry, pinned in config rather than left to helper.py's defaults.
+    # Those defaults moved (width 0.15->0.20 Ly, strength 0.5->1.0) when Euler/ was
+    # synced from EulerSR, which silently changes every solution: the sponge is
+    # subtracted from every flux, so old and new snapshots would come from
+    # different farfield treatments while looking identical.  Setting them here
+    # keeps the ~700 existing bundles comparable and makes the choice versioned.
+    _Ly = float(mesh.metadata.get("domain", {}).get("Ly", 0.0) or 0.0)
+    _wf = cfg.get("sponge_width_frac")
+    _sf = cfg.get("sponge_strength_frac")
+    if _wf is not None and _Ly > 0.0:
+        kw["sponge_width"] = float(_wf) * _Ly
+        if _sf is not None:
+            a_inf = float(np.sqrt(cfg["gamma"] * cfg["p_inf"] / cfg["rho_inf"]))
+            U_inf = float(cfg["Mach"]) * a_inf
+            kw["sponge_strength"] = float(_sf) * (U_inf + a_inf) / kw["sponge_width"]
     exp = cfg["export"]
     stationarity_threshold = float(cfg.get("stationarity_threshold"))
     stationarity_check_every = int(cfg.get("stationarity_check_every"))
 
     # Calcul dt selon CFL (fixe dans ce cas)
-    if 0.6 < cfg["Mach"] < 1.1 and cfg["CFL"] > 0.4:
-        print(f"Attention : régime transsonique avec CFL={cfg['CFL']} potentiellement instable. CFL réduite à 0.4")
-        cfg["CFL"] = 0.4
-    dt = helper.get_dt(W, mesh, CFL=cfg["CFL"], gamma=cfg["gamma"], M=1.0)
+    if 0.6 < cfg["Mach"] < 1.1 and cfg["CFL"] > 0.45:
+        if verbose:
+            print(f"Attention : régime transsonique avec CFL={cfg['CFL']} potentiellement instable. CFL réduite à 0.45")
+        cfg["CFL"] = 0.45
+    # get_dt takes a GLOBAL min over cells, so a non-uniform warm start yields a
+    # different dt -- and therefore a different N and a different physical time per
+    # step -- than a cold run of the same case.  Comparing seeds then compares two
+    # clocks as well as two initial states.  --dt pins one value across the whole
+    # comparison.  Legitimate because for SRK2 the discrete steady state satisfies
+    # R(W*)=0 independently of dt: pinning dt changes the path, not the answer.
+    if cfg.get("dt") is not None:
+        dt = jnp.asarray(float(cfg["dt"]), dtype=W.dtype)
+        if verbose:
+            dt_nat = float(helper.get_dt(W, mesh, CFL=cfg["CFL"], gamma=cfg["gamma"], M=1.0))
+            print(f"    dt imposé = {float(dt):.6e} (naturel pour cet état : {dt_nat:.6e})")
+    else:
+        dt = helper.get_dt(W, mesh, CFL=cfg["CFL"], gamma=cfg["gamma"], M=1.0)
     N = int(cfg["tf"] / dt) + 1
     n_snaps = max(1, int(exp["n_snaps"]))
 
@@ -60,14 +107,17 @@ def run(W, mesh, inlet, cfg, out_dirs):
     if n_snaps == 1:
         snap_steps = [N]
 
-    print(f"    dt={float(dt):.2e}, Nt={N}, n_snaps={n_snaps}")
+    if verbose:
+        print(f"    dt={float(dt):.2e}, Nt={N}, n_snaps={n_snaps}")
 
     # Warm-up pour compilation JIT
-    print("\nCompilation JIT (warm-up)...")
+    if verbose:
+        print("\nCompilation JIT (warm-up)...")
     W_warmup = fn(W, mesh, dt, **kw)
     jax.block_until_ready(W_warmup)
 
-    print("\nRésolution numérique en cours...")
+    if verbose:
+        print("\nRésolution numérique en cours...")
     start_time = time.time()
 
     def scan_body(carry, _):
@@ -83,11 +133,19 @@ def run(W, mesh, inlet, cfg, out_dirs):
             rel = jnp.linalg.norm(delta_W) / (block_steps * (jnp.linalg.norm(W_ref) + 1e-16))
             stop_new = rel <= stationarity_threshold
             stopping_step_new = jnp.where(jnp.logical_and(jnp.logical_not(stop), stop_new), next_step, stopping_step)
-            return (W_next, W_next, next_step, rel, jnp.logical_or(stop, stop_new), next_step, stopping_step_new), None
+            new_carry = (W_next, W_next, next_step, rel, jnp.logical_or(stop, stop_new), next_step, stopping_step_new)
+            return new_carry, rel
 
         def no_check(_):
-            return (W_next, W_ref, ref_step, last_stationarity_rel, stop, next_step, stopping_step), None
+            new_carry = (W_next, W_ref, ref_step, last_stationarity_rel, stop, next_step, stopping_step)
+            return new_carry, last_stationarity_rel
 
+        # The per-check `rel` is stacked into the scan's ys.  Without it a run
+        # records only the single threshold it happened to be given, and the
+        # measured floor of `rel` depends on stationarity_check_every (an
+        # oscillatory residual averages out over a longer block), so a threshold
+        # chosen up front is a guess.  Keeping the curve lets "steps to reach
+        # tolerance X" be read off afterwards, for any X, from one run.
         return jax.lax.cond(check_now, do_check, no_check, operand=None)
 
     init_carry = (
@@ -99,7 +157,7 @@ def run(W, mesh, inlet, cfg, out_dirs):
         jnp.asarray(0, dtype=jnp.int32),
         jnp.asarray(N, dtype=jnp.int32),
     )
-    final_carry, _ = jax.lax.scan(scan_body, init_carry, None, length=N)
+    final_carry, rel_trace = jax.lax.scan(scan_body, init_carry, None, length=N)
     W, _, _, last_stationarity_rel, converged, stopping_step, stopping_step = final_carry
     jax.block_until_ready(W)
 
@@ -116,33 +174,83 @@ def run(W, mesh, inlet, cfg, out_dirs):
     wall_time_s = end_time - start_time
     final_time = current_step * float(dt)
     snapshot_name = format_snapshot_name(cfg, final_time)
-    print("\n" + "-" * 78)
-    print(f"Simulation terminée en {wall_time_s:.2f}s (converged={converged}, t={final_time:.4f}s)")
-    print(f"Résidu final : {final_residual:.6e}")
+
+    # Convergence curve, subsampled to the check points (between checks the trace
+    # just repeats the last value).  Written outside the timer.
+    conv_steps, conv_rel = None, None
+    if cfg.get("save_convergence", False):
+        _trace = np.asarray(jax.device_get(rel_trace), dtype=float)
+        _idx = np.unique(np.concatenate([
+            np.arange(stationarity_check_every, N + 1, stationarity_check_every),
+            np.asarray([N])])) - 1
+        _idx = _idx[(_idx >= 0) & (_idx < len(_trace))]
+        conv_steps = (_idx + 1).astype(int)
+        conv_rel = _trace[_idx]
+        _cp = out_dirs["res"] / f"convergence_{snapshot_name}.npz"
+        out_dirs["res"].mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(str(_cp), step=conv_steps, rel=conv_rel,
+                            dt=np.asarray([float(dt)]), n_steps_total=np.asarray([int(N)]),
+                            wall_time_s=np.asarray([float(wall_time_s)]))
+        if verbose:
+            print(f"Convergence trace : {_cp}  ({len(conv_steps)} checks, "
+                  f"rel {conv_rel.max():.3e} → {conv_rel.min():.3e})")
+    if verbose:
+        print("\n" + "-" * 78)
+        print(f"Simulation terminée en {wall_time_s:.2f}s (converged={converged}, t={final_time:.4f}s)")
+        print(f"Résidu final : {final_residual:.6e}")
+    else:
+        print(f"Simulation terminée en {wall_time_s:.2f}s (converged={converged}, t={final_time:.4f}s, résidu={final_residual:.2e})")
     if exp["results"] or exp["figures"] or exp.get("bundle", True):
-        export_snapshot(W, mesh, final_time, cfg, out_dirs, helper, inlet=inlet)
+        if parent is None:
+            export_snapshot(W, mesh, final_time, cfg, out_dirs, helper, inlet=inlet)
+        else:
+            W_out = average_to_parent(W, mesh.area, parent, int(np.asarray(export_mesh.tris).shape[0]))
+            export_snapshot(jnp.asarray(W_out), export_mesh, final_time, cfg, out_dirs, helper, inlet=inlet)
     if exp["graph"]:
         W_snapshots = {round(final_time, 6): np.array(W)}
         export_graph(mesh, W_snapshots, inlet, save_path=str(out_dirs["res"] / "graph.npz"))
     summary = None
-    if cfg["case"] in ("diamond", "bump") and (exp.get("summary", True)):
+    if str(cfg["case"]).lower() in ("diamond", "bump", "naca0012", "naca2412", "rae2822", "onerad", "oa209") and (exp.get("summary", True)):
         U_inf = cfg["Mach"] * np.sqrt(cfg["gamma"] * cfg["p_inf"] / cfg["rho_inf"])
         C_D = helper.get_drag_coefficient(W=W, mesh=mesh, rho_inf=cfg["rho_inf"], U_inf=U_inf, L_ref=mesh.metadata["obstacle_length"])
         C_L = helper.get_lift_coefficient(W=W, mesh=mesh, rho_inf=cfg["rho_inf"], U_inf=U_inf, L_ref=mesh.metadata["obstacle_length"])
         delta_S = helper.get_entropy_creation(W_initial, W, mesh, gamma=cfg["gamma"])
-        print(f"C_D = {C_D:.6f}, C_L = {C_L:.6f}, ΔS = {delta_S:.6e}")
+        if verbose:
+            print(f"C_D = {C_D:.6f}, C_L = {C_L:.6f}, ΔS = {delta_S:.6e}")
         summary = build_run_summary(cfg, mesh, C_D, C_L, delta_S, wall_time_s,
-            stationarity_rel=final_residual, converged=converged, stopping_step=stopping_step)
+            stationarity_rel=final_residual, converged=converged, stopping_step=stopping_step,
+            dt=float(dt), n_steps_total=N)
 
     if exp.get("summary", True) and summary is not None:
-        export_run_summary(out_dirs, summary, snapshot_name)
+        export_run_summary(out_dirs, summary, snapshot_name, verbose=verbose)
     return W
 
 if __name__ == "__main__":
 
     CFG = build_config_from_cli(CFG)
     mesh = load_mesh(CFG)
+    solver_mesh, parent = load_solver_mesh(mesh, CFG)
     out_dirs = setup_dirs(CFG, mesh)
     print_config(CFG, mesh, out_dirs)
-    W, inlet = initialize(mesh, CFG)
-    run(W, mesh, inlet, CFG, out_dirs)
+    if parent is not None:
+        print(f"Solver mesh : {mesh.metadata['solver_mesh']} ({len(solver_mesh.tris)} cells), "
+              f"snapshot exported on the {len(mesh.tris)}-cell mesh")
+    W, inlet = initialize(solver_mesh, CFG)
+    # `inlet` is the farfield Dirichlet value and the sponge target: it stays the
+    # freestream state at the TARGET condition no matter what seeds the interior.
+    W_cold = W
+    if CFG.get("init_state"):
+        W, init_meta = load_init_state(
+            CFG["init_state"], mesh, CFG,
+            method=CFG.get("init_method"), t=CFG.get("init_t"),
+            dtype=W.dtype, parent=parent,
+            allow_repair=bool(CFG.get("init_allow_repair", False)))
+        W = jnp.asarray(W)
+        CFG["init_meta"] = init_meta
+        print(f"État initial : {init_meta['init_kind']} {CFG['init_state']}"
+              + (f" [{init_meta.get('init_method')} @ t={init_meta.get('init_t')}]"
+                 if init_meta.get("init_method") else "")
+              + f"  (rho_min={init_meta['init_rho_min']:.4f}, "
+                f"p_min={init_meta['init_p_min']:.4f})")
+    run(W, solver_mesh, inlet, CFG, out_dirs, export_mesh=mesh, parent=parent,
+        W_freestream=W_cold)

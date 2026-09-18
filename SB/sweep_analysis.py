@@ -63,11 +63,23 @@ def _mesh_h(cfg: dict) -> float:
     from the cell count (h ∝ 1/√N calibrated on diamond_h0.025) when the filename
     carries no _h tag.
     """
-    m = re.search(r"_h([0-9.]+)\.npy$", str(cfg.get("mesh", "")))
+    m = re.search(r"_h([0-9.]+)(?:le[0-9.]+)?\.npy$", str(cfg.get("mesh", "")))
     if m:
         return float(m.group(1))
     n = cfg.get("n_cells")
     return 0.025 * float(np.sqrt(20190.0 / n)) if n else float("nan")
+
+
+def _mesh_variant(cfg: dict) -> str:
+    """"le7" for a nose-refined corpus (mesh <case>_h0.025le7.npy), "" otherwise.
+
+    Those references were solved on a nested nose-refined mesh (see
+    Euler/meshing/mesh_utils.py) and are a different corpus from the plain-h one
+    at the SAME h, so the variant is folded into the hmode label ("eig_le7"):
+    every grouping, plot and CSV then keeps the two apart.
+    """
+    m = re.search(r"_h[0-9.]+(le[0-9.]+)\.npy$", str(cfg.get("mesh", "")))
+    return m.group(1) if m else ""
 
 
 def run_label(rows):
@@ -121,7 +133,7 @@ def load_runs(root: str) -> list[dict]:
         aero = m.get("aero")
         row = dict(
             path=os.path.dirname(path),
-            hmode=cfg.get("hessian_mode", "?"),
+            hmode=cfg.get("hessian_mode", "?") + (f"_{v}" if (v := _mesh_variant(cfg)) else ""),
             # Seeded bootstraps are distinct schemes: compose the name so that
             # SBsquared_exact seeded from ffd never pools with the heat-seeded one.
             drift=(cfg.get("reference_drift", "null")

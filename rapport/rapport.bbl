@@ -1,0 +1,67 @@
+\begin{thebibliography}{10}
+
+\bibitem{caissard2017heatkernel}
+Thomas Caissard, David Coeurjolly, Jacques-Olivier Lachaud, and Tristan
+  Roussillon.
+\newblock Heat kernel {L}aplace-{B}eltrami operator on digital surfaces, 2017.
+\newblock HAL: hal-01575544.
+
+\bibitem{caluya2020reflected}
+Kenneth~F. Caluya and Abhishek Halder.
+\newblock Reflected {S}chr{\"o}dinger bridge: density control with path
+  constraints, 2020.
+\newblock arXiv:2003.13895.
+
+\bibitem{chen2015hilbert}
+Yongxin Chen, Tryphon~T. Georgiou, and Michele Pavon.
+\newblock Entropic and displacement interpolation: a computational approach
+  using the {H}ilbert metric, 2015.
+\newblock arXiv:1506.04255.
+
+\bibitem{chen2015optimal}
+Yongxin Chen, Tryphon~T. Georgiou, and Michele Pavon.
+\newblock Optimal transport over a linear dynamical system, 2015.
+\newblock arXiv:1502.01265.
+
+\bibitem{cucchiara2024cdi}
+Simona Cucchiara, Angelo Iollo, Tommaso Taddei, and Haysam Telib.
+\newblock Model order reduction by convex displacement interpolation, 2024.
+\newblock HAL: inria-04808796.
+
+\bibitem{debortoli2021diffusion}
+Valentin De~Bortoli, James Thornton, Jeremy Heng, and Arnaud Doucet.
+\newblock Diffusion {S}chr{\"o}dinger bridge with applications to score-based
+  generative modeling, 2021.
+\newblock arXiv:2106.01357.
+
+\bibitem{deromemont2026jaxfvm}
+Guillaume de~Rom{\'e}mont.
+\newblock {JAX-FVM}: A differentiable, entropy-stable finite volume solver on
+  unstructured meshes for compressible flows, 2026.
+\newblock arXiv:2607.07385.
+
+\bibitem{iollo2022mapping}
+Angelo Iollo and Tommaso Taddei.
+\newblock Mapping of coherent structures in parameterized flows by learning
+  optimal transportation with {G}aussian models.
+\newblock {\em Journal of Computational Physics}, 2022.
+\newblock arXiv:2109.08769.
+
+\bibitem{pavon2018datadriven}
+Michele Pavon, Esteban~G. Tabak, and Giulio Trigila.
+\newblock The data-driven {S}chr{\"o}dinger bridge, 2018.
+\newblock arXiv:1806.01364.
+
+\bibitem{tong2024simulationfree}
+Alexander Tong, Nikolay Malkin, Kilian Fatras, Lazar Atanackovic, Yanlei Zhang,
+  Guillaume Huguet, Guy Wolf, and Yoshua Bengio.
+\newblock Simulation-free {S}chr{\"o}dinger bridges via score and flow
+  matching, 2024.
+\newblock arXiv:2307.03672.
+
+\bibitem{zhu2024neuralsinkhorn}
+Huminhao Zhu, Fangyikang Wang, Chao Zhang, Hanbin Zhao, and Hui Qian.
+\newblock Neural {S}inkhorn gradient flow, 2024.
+\newblock arXiv:2401.14069.
+
+\end{thebibliography}

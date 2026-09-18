@@ -9,13 +9,28 @@ import matplotlib.pyplot as plt
 try:
     from config import format_snapshot_name, format_subtitle
 except ModuleNotFoundError:
-    from Euler.config import format_snapshot_name, format_subtitle
+    from euler.config import format_snapshot_name, format_subtitle
 
 base_hot = mpl.cm.get_cmap("hot")
 hot_colors = base_hot(np.linspace(0.0, 0.8, 256))
 HOT_CMAP_CROPPED = mpl.colors.LinearSegmentedColormap.from_list("hot_cropped", hot_colors)
 
 repo_root = Path(__file__).resolve().parents[1]
+
+
+def average_to_parent(W, child_area, parent, n_parent):
+    """Area-weighted average of a cell field on a nested child mesh onto its parent.
+
+    Averaging the CONSERVED variables is the finite-volume restriction: it keeps
+    mass, momentum and energy of every parent cell exactly, and a parent whose
+    only child is itself gets its value back unchanged.
+    """
+    W = np.asarray(W)
+    a = np.asarray(child_area, dtype=np.float64)
+    wsum = np.bincount(parent, weights=a, minlength=n_parent)
+    out = np.stack([np.bincount(parent, weights=a * W[:, k].astype(np.float64), minlength=n_parent)
+                    for k in range(W.shape[1])], axis=1) / wsum[:, None]
+    return out.astype(W.dtype)
 
 
 def export_snapshot(W, mesh, t, cfg, out_dirs, helper, inlet=None):
@@ -39,7 +54,8 @@ def export_snapshot(W, mesh, t, cfg, out_dirs, helper, inlet=None):
         prims_grad = helper.getgradientLSQ(prims_L, prims_R, mesh)
         mach_field = helper.get_mach_number(prims, gamma=gamma)
         bundle_path = out_dirs["res"] / f"{snapshot_name}.npz"
-        print(f"Bundle export : {bundle_path}")
+        if cfg.get("verbose", True):
+            print(f"Bundle export : {bundle_path}")
 
         mesh_path_val = str(cfg.get('mesh_path', ''))
         n_cells_val = int(np.asarray(mesh.tris).shape[0]) if getattr(mesh, 'tris', None) is not None else -1
@@ -106,7 +122,8 @@ def export_snapshot(W, mesh, t, cfg, out_dirs, helper, inlet=None):
             if field_name not in field_lookup:
                 raise ValueError(f"Unknown figure field '{field_name}'. Expected one of: rho, u, v, p, M, S")
             fig_path = out_dirs["fig"] / f"{field_name}_{snapshot_name}.png"
-            print(f"Figure export : {fig_path}")
+            if cfg.get("verbose", True):
+                print(f"Figure export : {fig_path}")
             mesh.plot_solution(
                 field_lookup[field_name],
                 labels=labels[field_name],
@@ -134,14 +151,20 @@ def export_snapshot(W, mesh, t, cfg, out_dirs, helper, inlet=None):
         if exp["figures"] and wall_profile["s"].size > 0:
             subtitle = format_subtitle(cfg, mesh, t)
             fig_path = out_dirs["fig"] / f"Mwall_{snapshot_name}.png"
-            print(f"Figure export : {fig_path}")
+            if cfg.get("verbose", True):
+                print(f"Figure export : {fig_path}")
             mesh.plot_profile(wall_profile["s"], wall_profile["mach"], labels=r'$M_{wall}$', filename=fig_path,
                 dpi=400, title="Profil de Mach de paroi", subtitle=subtitle, xlabel=r"Abscisse curviligne $s$")
 
     return diagnostics
 
 
-def build_run_summary(cfg, mesh, cd, cl, delta_s, wall_time_s, stationarity_rel=None, converged=None, stopping_step=None):
+def build_run_summary(cfg, mesh, cd, cl, delta_s, wall_time_s, stationarity_rel=None,
+                      converged=None, stopping_step=None, dt=None, n_steps_total=None):
+    # init_* describe the warm start, and are None for an ordinary cold run.  They
+    # are what makes a speedup row interpretable: which seed, at which
+    # interpolation time, and whether it needed repair to be admissible.
+    init_meta = cfg.get("init_meta") or {}
     return {
         "case": cfg["case"],
         "h": mesh.metadata.get("h"),
@@ -155,22 +178,34 @@ def build_run_summary(cfg, mesh, cd, cl, delta_s, wall_time_s, stationarity_rel=
         "stationarity_threshold": float(cfg.get("stationarity_threshold")) if cfg.get("stationarity_threshold") is not None else None,
         "stationarity_check_every": int(cfg.get("stationarity_check_every")) if cfg.get("stationarity_check_every") is not None else None,
         "wall_time_s": float(wall_time_s),
+        "dt": float(dt) if dt is not None else None,
+        "n_steps_total": int(n_steps_total) if n_steps_total is not None else None,
+        "dt_imposed": cfg.get("dt") is not None,
+        "out_tag": cfg.get("out_tag"),
         "time_scheme": cfg["time_scheme"],
         "flux": cfg["flux"],
         "reconstruction": cfg["reconstruction"],
         "mach": cfg["Mach"],
         "mesh_path": cfg["mesh_path"],
         "aoa": float(cfg.get("aoa", 0.0)),
+        "init_source": init_meta.get("init_source"),
+        "init_kind": init_meta.get("init_kind"),
+        "init_method": init_meta.get("init_method"),
+        "init_t": init_meta.get("init_t"),
+        "init_repair_count": init_meta.get("init_repair_count"),
+        "init_rho_min": init_meta.get("init_rho_min"),
+        "init_p_min": init_meta.get("init_p_min"),
     }
 
 
-def export_run_summary(out_dirs, summary, snapshot_name):
+def export_run_summary(out_dirs, summary, snapshot_name, verbose=True):
     # Exporte le résumé de la simulation (temps de calcul, C_D, etc...) dans un fichier JSON
     out_dirs["res"].mkdir(parents=True, exist_ok=True)
     path = out_dirs["res"] / f"summary_{snapshot_name}.json"
     with open(path, "w") as f:
         json.dump(summary, f, indent=2)
-    print(f"Summary written : {path}")
+    if verbose:
+        print(f"Summary written : {path}")
 
 
 def normalize_figure_fields(figures_value):

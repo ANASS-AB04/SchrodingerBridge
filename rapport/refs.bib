@@ -1,0 +1,161 @@
+% =====================================================================
+%  Bibliographie du rapport de stage
+%  Les clés sont celles utilisées dans rapport.tex.
+% =====================================================================
+
+% ---------------------------------------------------------------------
+%  Le solveur utilisé (base du code CFD, antérieure au stage)
+% ---------------------------------------------------------------------
+@misc{deromemont2026jaxfvm,
+  author       = {de Rom{\'e}mont, Guillaume},
+  title        = {{JAX-FVM}: A differentiable, entropy-stable finite volume
+                  solver on unstructured meshes for compressible flows},
+  year         = {2026},
+  eprint       = {2607.07385},
+  note   = {arXiv:2607.07385},
+  archiveprefix = {arXiv},
+  primaryclass = {physics.flu-dyn},
+  url          = {https://arxiv.org/abs/2607.07385}
+}
+
+% ---------------------------------------------------------------------
+%  Réduction de modèle par transport / recalage
+% ---------------------------------------------------------------------
+% TODO : confirmer volume / numéro d'article / pages sur la version éditeur.
+@article{iollo2022mapping,
+  author  = {Iollo, Angelo and Taddei, Tommaso},
+  title   = {Mapping of coherent structures in parameterized flows by learning
+             optimal transportation with {G}aussian models},
+  journal = {Journal of Computational Physics},
+  year    = {2022},
+  eprint  = {2109.08769},
+  note   = {arXiv:2109.08769},
+  archiveprefix = {arXiv},
+  primaryclass  = {math.NA}
+}
+
+@misc{cucchiara2024cdi,
+  author = {Cucchiara, Simona and Iollo, Angelo and Taddei, Tommaso and
+            Telib, Haysam},
+  title  = {Model order reduction by convex displacement interpolation},
+  year   = {2024},
+  note   = {HAL: inria-04808796},
+  url    = {https://inria.hal.science/hal-04808796v1}
+}
+
+% ---------------------------------------------------------------------
+%  Théorie et résolution numérique du pont de Schrödinger
+% ---------------------------------------------------------------------
+@misc{chen2015optimal,
+  author = {Chen, Yongxin and Georgiou, Tryphon T. and Pavon, Michele},
+  title  = {Optimal transport over a linear dynamical system},
+  year   = {2015},
+  eprint = {1502.01265},
+  note   = {arXiv:1502.01265},
+  archiveprefix = {arXiv},
+  primaryclass  = {math.OC}
+}
+
+@misc{chen2015hilbert,
+  author = {Chen, Yongxin and Georgiou, Tryphon T. and Pavon, Michele},
+  title  = {Entropic and displacement interpolation: a computational approach
+            using the {H}ilbert metric},
+  year   = {2015},
+  eprint = {1506.04255},
+  note   = {arXiv:1506.04255},
+  archiveprefix = {arXiv},
+  primaryclass  = {math.OC}
+}
+
+@misc{pavon2018datadriven,
+  author = {Pavon, Michele and Tabak, Esteban G. and Trigila, Giulio},
+  title  = {The data-driven {S}chr{\"o}dinger bridge},
+  year   = {2018},
+  eprint = {1806.01364},
+  note   = {arXiv:1806.01364},
+  archiveprefix = {arXiv},
+  primaryclass  = {math.OC}
+}
+
+@misc{caluya2020reflected,
+  author = {Caluya, Kenneth F. and Halder, Abhishek},
+  title  = {Reflected {S}chr{\"o}dinger bridge: density control with path
+            constraints},
+  year   = {2020},
+  eprint = {2003.13895},
+  note   = {arXiv:2003.13895},
+  archiveprefix = {arXiv},
+  primaryclass  = {math.OC}
+}
+
+% ---------------------------------------------------------------------
+%  Panorama : ponts de Schrödinger côté apprentissage
+% ---------------------------------------------------------------------
+@misc{debortoli2021diffusion,
+  author = {De Bortoli, Valentin and Thornton, James and Heng, Jeremy and
+            Doucet, Arnaud},
+  title  = {Diffusion {S}chr{\"o}dinger bridge with applications to
+            score-based generative modeling},
+  year   = {2021},
+  eprint = {2106.01357},
+  note   = {arXiv:2106.01357},
+  archiveprefix = {arXiv},
+  primaryclass  = {stat.ML}
+}
+
+@misc{tong2024simulationfree,
+  author = {Tong, Alexander and Malkin, Nikolay and Fatras, Kilian and
+            Atanackovic, Lazar and Zhang, Yanlei and Huguet, Guillaume and
+            Wolf, Guy and Bengio, Yoshua},
+  title  = {Simulation-free {S}chr{\"o}dinger bridges via score and flow
+            matching},
+  year   = {2024},
+  eprint = {2307.03672},
+  note   = {arXiv:2307.03672},
+  archiveprefix = {arXiv},
+  primaryclass  = {cs.LG}
+}
+
+@misc{zhu2024neuralsinkhorn,
+  author = {Zhu, Huminhao and Wang, Fangyikang and Zhang, Chao and
+            Zhao, Hanbin and Qian, Hui},
+  title  = {Neural {S}inkhorn gradient flow},
+  year   = {2024},
+  eprint = {2401.14069},
+  note   = {arXiv:2401.14069},
+  archiveprefix = {arXiv},
+  primaryclass  = {cs.LG}
+}
+
+% ---------------------------------------------------------------------
+%  Discrétisation du noyau de la chaleur
+% ---------------------------------------------------------------------
+@misc{caissard2017heatkernel,
+  author = {Caissard, Thomas and Coeurjolly, David and
+            Lachaud, Jacques-Olivier and Roussillon, Tristan},
+  title  = {Heat kernel {L}aplace-{B}eltrami operator on digital surfaces},
+  year   = {2017},
+  note   = {HAL: hal-01575544},
+  url    = {https://hal.archives-ouvertes.fr/hal-01575544}
+}
+
+% =====================================================================
+%  TODO — références manquantes, à ajouter avant les parties concernées
+% =====================================================================
+%
+%  ATTENTION : ne pas écrire d'exemple d'entrée avec un arobase même en
+%  commentaire — BibTeX scanne les arobases y compris dans les lignes
+%  commentées et tente de parser l'entrée.
+%
+%  §5.1 — Métrique hessienne (Alauzet & Loseille). MANQUE LE PLUS IMPORTANT :
+%         toute la construction de la marginale en dépend.
+%         Clé prévue : alauzet2010metric  (type article)
+%
+%  §5.3 — Free-Form Deformation. Soit la référence fondatrice
+%         (Sederberg & Parry, SIGGRAPH 1986), soit la référence propre au
+%         framework `phdtruel/` de M. Truel.
+%         Clé prévue : sederberg1986ffd  (type inproceedings)
+%
+%  §3.2 — Facultatif : Toro, *Riemann Solvers and Numerical Methods for
+%         Fluid Dynamics*, à n'ajouter que si HLLC/MUSCL sont détaillés.
+%         La référence JAX-FVM couvre déjà le schéma.

@@ -75,6 +75,37 @@ def check_resolution(dx_ref, gamma_diff, n_steps, label="heat", n_budget=20000):
               f"as 1/dx²; expect this run to be ~{n_steps/n_budget:.1f}× the budgeted time.")
 
 
+def check_cfl_stability(mesh, pct, label="heat"):
+    """Flag cells that will run UNSTABLE at a timestep sized on the pct-th cell.
+
+    ``compute_n_steps`` sizes dt on a percentile rather than the minimum, on the
+    grounds that the smallest cells only suffer larger truncation error.  That is
+    true for an implicit scheme and false for this one: explicit diffusion is
+    conditionally stable, so a cell below the reference size is past its
+    stability limit and grows exponentially.  The excess goes as (dx_ref/dx_min)^2.
+
+    Measured: diamond h0.025 exceeds by 2.7x and survives (SSP-RK2 has some
+    margin); naca0012 h0.025 exceeds by 19.9x and every IPFP residual comes back
+    NaN after ~10^5 steps.  Warn past 4x, which sits between the two.
+    """
+    dx_i = (np.asarray(mesh.area)
+            / np.sum(np.asarray(mesh.surface)[
+                         np.asarray(mesh.face_connectivity)], axis=-1))
+    dx_ref = float(np.percentile(dx_i, pct))
+    dx_min = float(dx_i.min())
+    excess = (dx_ref / max(dx_min, 1e-30)) ** 2
+    if excess > 4.0:
+        n_bad = int((dx_i < dx_ref).sum())
+        print(f"    [WARN] {label} kernel will be UNSTABLE: dt is sized on the "
+              f"{pct}th-percentile cell (dx={dx_ref:.2e}) but the smallest cell is "
+              f"dx={dx_min:.2e} — {excess:.1f}x past its explicit stability limit, "
+              f"in {n_bad} of {len(dx_i)} cells.  Expect residuals to go NaN and "
+              f"IPFP to burn its full iteration cap at every stage.  Use pct=0 "
+              f"(and start the gamma ladder lower to pay for it), or remesh with a "
+              f"smaller cell-size spread.")
+    return excess
+
+
 def compute_n_steps(mesh, gamma_diff, t_target=1.0, CFL=0.5, pct=10, warn=True):
     """
     Number of explicit RK2-SSP steps required to integrate ∂φ/∂t = γ Δφ
@@ -95,6 +126,7 @@ def compute_n_steps(mesh, gamma_diff, t_target=1.0, CFL=0.5, pct=10, warn=True):
     dt_max = CFL * dx_ref ** 2 / gamma_diff
     n = max(int(np.ceil(t_target / dt_max)), 1)
     if warn:
+        check_cfl_stability(mesh, pct, label="heat")
         check_resolution(dx_ref, gamma_diff, n, label="heat")
     return n
 

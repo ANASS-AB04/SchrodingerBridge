@@ -1,0 +1,713 @@
+% =====================================================================
+%  Results deck: Schrodinger Bridge interpolation on the bump and the
+%  NACA0012, the Mach sweep (L2 / Linf / aerodynamic coefficients), and
+%  the warm-start speed-up recap.
+%
+%  Slides 2-7 are the reminders, kept verbatim from SB_sweep.tex.
+%
+%  Compile from the repo root or from SB/ (graphicspath covers both):
+%      pdflatex -output-directory=SB SB/SB_results.tex   (x2, for the TOC)
+% =====================================================================
+\documentclass[aspectratio=169]{beamer}
+
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{caption}
+\usepackage{tikz}
+\usetikzlibrary{positioning, shapes.geometric, arrows.meta}
+
+\graphicspath{{outputs/}{../outputs/}}
+
+\usetheme{Madrid}
+\usecolortheme{default}
+\setbeamertemplate{navigation symbols}{}
+\setbeamerfont{block title}{size=\small}
+
+\title[SB ROMs — Bump \& NACA0012]{Schrödinger Bridge for Non-linear ROMs}
+\subtitle{Results on the Bump and the NACA0012, and the Warm-Start Pay-off}
+\author{Aboufadel Anas}
+\date{\today}
+
+% --- Custom Vector/Matrix Macros (shared with SB_sweep.tex) ---
+\newcommand{\bt}{\mathbf{b}}
+\newcommand{\xv}{\mathbf{x}}
+\newcommand{\av}{\mathbf{a}}
+\newcommand{\dhat}{\mathbf{\hat{d}}}
+\newcommand{\R}{\mathbf{R}}
+\newcommand{\grad}{\nabla}
+\newcommand{\dive}{\nabla\!\cdot}
+\newcommand{\Qcal}{\mathcal{Q}}
+\newcommand{\Pcal}{\mathcal{P}}
+\newcommand{\id}{\mathrm{id}}
+
+% Green = SB wins, red = SB loses.  Used in every comparison table so the
+% verdict is readable from the back of the room.
+\newcommand{\win}[1]{\textcolor{green!55!black}{\textbf{#1}}}
+\newcommand{\lose}[1]{\textcolor{red!75!black}{#1}}
+
+\begin{document}
+
+\begin{frame}
+    \titlepage
+\end{frame}
+\begin{frame}{Recap — Fokker--Planck Formulation}
+
+Let $\mu,\nu\in\mathcal{P}(\mathbb{R}^d)$ be the initial and terminal marginals,
+time rescaled to $[0,1]$, $\gamma>0$ the diffusion coefficient.
+
+We seek a density--velocity pair $(\rho_t,\bt_t)_{t\in[0,1]}$ with
+$\rho_0=\mu$, $\rho_1=\nu$ such that
+\begin{itemize}
+    \item $\rho_t$ solves the \textbf{Fokker--Planck equation}
+    \[
+        \partial_t \rho_t + \dive(\rho_t\,\bt_t) = \gamma\,\Delta \rho_t ,
+    \]
+    \item the pair minimizes the \textbf{expected kinetic energy}
+    \[
+        \mathcal{J}(\rho,\bt)=\int_0^1\!\!\int_{\mathbb{R}^d}\tfrac12|\bt_t(\xv)|^2\,\rho_t(\xv)\,d\xv\,dt .
+    \]
+\end{itemize}
+
+Girsanov applied to $dX_t=\bt_t(X_t)\,dt+\sqrt{2\gamma}\,dW_t$ gives
+$\mathrm{KL}(\mathbb{P}\,\|\,\mathbb{R})=\mathcal{J}/(2\gamma)$: the Schrödinger
+bridge is the minimal-energy stochastic interpolation between $\mu$ and $\nu$.
+
+\end{frame}
+\begin{frame}{Recap — Heat and Advection--Diffusion Semigroups}
+
+Hopf--Cole ($\eta=e^{f}$, $\eta^\ast=e^{g}$) linearizes the optimality system into
+two transport--diffusion PDEs, whose transition operators are the SB kernel.
+
+\begin{block}{Driftless bridge ($\boldsymbol{\beta}\equiv0$) — heat semigroup $\Pcal_\tau=e^{\tau\gamma\Delta}$}
+\[
+    \partial_\tau\phi=\gamma\,\Delta\phi,\qquad \partial_n\phi|_{\partial\Omega}=0
+    \quad(\text{Neumann, no-flux}).
+\]
+\end{block}
+
+\begin{block}{Drifted bridge — advection--diffusion semigroups $\Qcal_\tau=e^{\tau\mathcal{L}}$, $\Qcal^{\dagger}_\tau=e^{\tau\mathcal{L}^\ast}$}
+\[
+    \underbrace{\partial_\tau\phi=\boldsymbol{\beta}\cdot\grad\phi+\gamma\Delta\phi}_{\Qcal:\ \text{non-conservative, backward}},
+    \qquad
+    \underbrace{\partial_\tau\phi=-\dive(\boldsymbol{\beta}\phi)+\gamma\Delta\phi}_{\Qcal^{\dagger}:\ \text{conservative, forward}} .
+\]
+\end{block}
+
+IPFP in log-potential form:
+\[
+    f^{(k+1)}=\log\mu-\log\Qcal_1\!\bigl[e^{g^{(k)}}\bigr],
+    \qquad
+    g^{(k+1)}=\log\nu-\log\Qcal^{\dagger}_1\!\bigl[e^{f^{(k+1)}}\bigr].
+\]
+FVM: TPFA diffusion $+$ first-order upwind advection, SSP-RK2, Anderson-accelerated.
+$\boldsymbol{\beta}\equiv0\Rightarrow\Qcal_1=\Qcal^{\dagger}_1=\Pcal_1$.
+
+\end{frame}
+\begin{frame}{Recap — Convex Displacement Interpolation (CDI)}
+
+The maps act on the shock-feature marginals; the physical Mach field is recovered
+gradient-free. For $t\in(0,1)$,
+\[
+    \boxed{\;
+    \widehat M(t,\xv)=(1-t)\,M_0\!\bigl((1-t)\,\xv+t\,S(\xv)\bigr)
+                     +t\,M_1\!\bigl(t\,\xv+(1-t)\,T(\xv)\bigr)
+    \;}
+\]
+
+\begin{itemize}
+    \item $M_0,M_1$ = endpoint Mach fields, sampled at the displaced pre-images by
+    linear interpolation on the mesh;
+    \item exact at the endpoints: $\widehat M(0,\cdot)=M_0$, $\widehat M(1,\cdot)=M_1$;
+    \item no map inversion — forward pre-image $t\xv+(1-t)T$ pulls back $M_1$,
+    backward pre-image $(1-t)\xv+tS$ pulls back $M_0$, blended with weights $(1-t,t)$.
+\end{itemize}
+
+The reference drift is designed to keep $T,S$ close to the identity, so the CDI
+reconstruction stays well-conditioned at small $\gamma$.
+
+\end{frame}
+\begin{frame}{Recap — Construction of the Transport Maps $T,S$}
+
+$T$ is the conditional mean of the target position given the source (built from
+$g$ through $\Qcal_1$); $S$ is its backward analogue (from $f$ through $\Qcal^{\dagger}_1$):
+\[
+    T(\xv)=\frac{\Qcal_1[\,\id\,e^{g}\,](\xv)}{\Qcal_1[e^{g}](\xv)}-\boldsymbol{\beta}_{\mathrm{bias}}(\xv),
+    \qquad
+    S(\xv)=\frac{\Qcal^{\dagger}_1[\,\id\,e^{f}\,](\xv)}{\Qcal^{\dagger}_1[e^{f}](\xv)}-\boldsymbol{\beta}_{\mathrm{bias}}(\xv).
+\]
+
+\begin{block}{Neumann identity-leak correction}
+\[
+    \boldsymbol{\beta}_{\mathrm{bias}}=\frac{\Qcal_1[\id]}{\Qcal_1[1]}-\Phi_{\bt},
+\]
+measured against the drift's own \emph{reflected deterministic flow} $\Phi_{\bt}$
+(identity when $\bt\equiv0$), so $\bt$'s transport stays in $T,S$.
+\end{block}
+
+Evaluated in the stable log-domain with a positivity shift $\id\mapsto\id-c$; a
+trust gate reverts kernel-collapse outlier cells to the identity. $T,S\to\id$ far
+from the transported feature.
+
+\end{frame}
+\begin{frame}{Oblique Drift (1/2) — Wave Angles}
+
+The LE and TE shocks rotate between their $M_0$ and $M_1$ wave angles:
+
+\begin{block}{$\theta$--$\beta$--$M$ relation (weak root) — LE family}
+\[
+    \tan\theta = 2\cot\beta_s\,\frac{M^2\sin^2\beta_s - 1}{M^2(\gamma_g+\cos2\beta_s)+2},
+    \qquad
+    \beta_s^{\mathrm{LE}}(M) = \beta_s(\alpha, M).
+\]
+\end{block}
+
+\begin{block}{TE family — LE shock $\to$ Prandtl--Meyer($2\alpha$) $\to$ TE shock}
+\[
+    \nu(M_b) = \nu(M_a) + 2\alpha,
+    \qquad
+    \beta_s^{\mathrm{TE}}(M) = \beta_s(\alpha, M_b(M)).
+\]
+\end{block}
+
+\begin{block}{Ray angles and rotation rates,\; $M(t)=(1-t)M_0+tM_1$}
+\[
+    \psi_{\mathrm{LE}} = \beta_s^{\mathrm{LE}}, \qquad
+    \psi_{\mathrm{TE}} = \beta_s^{\mathrm{TE}}-\alpha, \qquad
+    \omega_\kappa(t) = \tfrac{d\beta_s^{\kappa}}{dM}\big|_{M(t)}\,(M_1-M_0).
+\]
+\end{block}
+
+\end{frame}
+\begin{frame}{Oblique Drift (2/2) — Windowed Rigid Rotation}
+
+\begin{block}{Four windowed rigid rotations about the apexes $\av_\kappa$}
+\[
+    \boxed{\;
+    \boldsymbol{\beta}(t,\xv) = \sum_{\kappa\in\{\mathrm{LE},\mathrm{TE}\}}\sum_{\sigma=\pm1}
+        \sigma\,\omega_\kappa(t)\,w_{\kappa,\sigma}(t,\xv)\,\R\,(\xv-\av_\kappa),
+    \qquad
+    \R = \bigl(\begin{smallmatrix}0&-1\\1&0\end{smallmatrix}\bigr)
+    \;}
+\]
+\[
+    w_{\kappa,\sigma} = e^{-\mathrm{dist}_{\kappa,\sigma}^2/\sigma_w(s)^2}\,
+        \mathbf{1}[s_{\kappa,\sigma}>0],
+    \qquad
+    s_{\kappa,\sigma} = (\xv-\av_\kappa)\cdot\dhat_{\kappa,\sigma}.
+\]
+\end{block}
+
+Zero in the freestream; the conical band $\sigma_w(s)$ covers the swept wedge;
+$\dive\boldsymbol{\beta}\neq0$ $\Rightarrow$ enters through the conservative $\Qcal^{\dagger}$.
+
+\end{frame}
+
+\section{Two New Geometries}
+
+\begin{frame}{What Is New Since the $\gamma$-Sweep}
+
+The diamond established the method; the question was whether it survives a
+geometry it was not designed around.
+
+\begin{columns}[T]
+\begin{column}{0.48\textwidth}
+\begin{block}{Bump (channel)}
+\begin{itemize}\small
+    \item Wall-mounted circular arc, 14{,}178 cells, $h=0.025$.
+    \item \textbf{No incidence axis} — AoA is meaningless on a channel wall.
+    \item \textbf{No \texttt{oblique} drift} — it is the analytic $\theta$--$\beta$--$M$
+          wedge solution, and there is no wedge.
+    \item 22 Mach bands, $0.80\to3.00$, width $0.10$.
+\end{itemize}
+\end{block}
+\end{column}
+\begin{column}{0.48\textwidth}
+\begin{block}{NACA0012 (airfoil)}
+\begin{itemize}\small
+    \item Rounded leading edge, 23{,}572 cells, $h=0.025$.
+    \item \textbf{Detached bow shock} at every Mach — the first geometry where
+          the transported feature is curved and never attaches.
+    \item Two incidences: AoA $0^\circ$ and $2^\circ$.
+    \item 22 Mach bands per incidence.
+\end{itemize}
+\end{block}
+\end{column}
+\end{columns}
+
+\vspace{0.5em}
+Everything else is held fixed: \texttt{iso\_hessian/eig} marginal,
+$\gamma$-ladder down to $10^{-4}$, drifts $\{$\texttt{null}, \texttt{ffd},
+\texttt{SBsquared\_exact+ffd}$\}$, and the same three interpolators compared in
+every run — \textbf{BaryCDI} (SB), \textbf{Linear}, \textbf{FFD}.
+
+\end{frame}
+
+\begin{frame}{Survey Design — 586 Runs}
+
+\begin{columns}[T]
+\begin{column}{0.55\textwidth}
+\begin{itemize}
+    \item Each run interpolates one $0.10$-wide Mach band from its two
+          endpoints and is scored against \textbf{9 high-resolution Euler
+          solves} at $t=0.1,\dots,0.9$.
+    \item Metrics per run: $L^2$, $L^\infty$, $W_2$, $C_D$, $C_L$, shock-band
+          $L^2$, shock angle $\Delta\beta$, IPFP residual, and the cost split
+          (offline vs.\ online).
+    \item \textbf{FFD is the control that matters}: it is the registration the
+          drift is built from, used directly as an interpolator. If SB does not
+          beat FFD, the bridge is not paying for its IPFP cost.
+\end{itemize}
+\end{column}
+\begin{column}{0.42\textwidth}
+\begin{block}{Three physical regimes}
+\begin{tabular}{@{}ll@{}}
+\toprule
+$M<1.0$ & no shock at all \\
+$1.0$--$1.25$ & detached bow shock \\
+$M>1.25$ & attached oblique shock \\
+\bottomrule
+\end{tabular}
+\end{block}
+\small
+The transport premise (a marginal concentrated on a moving shock) is built for
+the third. The first two are \emph{exploratory} and are shaded red/orange in
+every sweep plot — not dropped, so the failure mode stays visible.
+\end{column}
+\end{columns}
+
+\end{frame}
+
+\section{Results — Bump}
+
+\begin{frame}{Bump — the Two Marginals, $M:2.50\to2.60$}
+
+\centering
+\includegraphics[width=0.97\linewidth, height=0.36\textheight, keepaspectratio]{deck/bump_Mach_M0_raw.png}\\[-0.4em]
+{\scriptsize Endpoint $M_0 = 2.50$}\\[0.2em]
+\includegraphics[width=0.97\linewidth, height=0.36\textheight, keepaspectratio]{deck/bump_Mach_M1_raw.png}\\[-0.4em]
+{\scriptsize Endpoint $M_1 = 2.60$}
+
+\end{frame}
+
+\begin{frame}{Bump — Reconstruction at $t=0.5$ ($M_\infty = 2.55$)}
+
+\centering
+\includegraphics[width=0.97\linewidth, height=0.36\textheight, keepaspectratio]{deck/bump_Mach_BaryCDI_t0.50.png}\\[-0.4em]
+{\scriptsize \win{BaryCDI (SB)} — the shock sits on the reference ray}\\[0.2em]
+\includegraphics[width=0.97\linewidth, height=0.36\textheight, keepaspectratio]{deck/bump_Mach_Linear_t0.50.png}\\[-0.4em]
+{\scriptsize Linear — the two endpoint shocks survive as a smeared pair}
+
+\end{frame}
+
+\begin{frame}{Bump — Absolute Error vs.\ the Reference}
+
+\begin{columns}
+\begin{column}{0.5\textwidth}
+\centering
+\includegraphics[width=\linewidth, height=0.66\textheight, keepaspectratio]{deck/bump_AbsErr_BaryCDI_abs_error.png}\\[-0.3em]
+{\scriptsize $|$BaryCDI $-$ ref$|$}
+\end{column}
+\begin{column}{0.5\textwidth}
+\centering
+\includegraphics[width=\linewidth, height=0.66\textheight, keepaspectratio]{deck/bump_AbsErr_Linear_abs_error.png}\\[-0.3em]
+{\scriptsize $|$Linear $-$ ref$|$}
+\end{column}
+\end{columns}
+
+\vspace{0.2em}
+\small Both leave error \emph{on} the shock — that is the residual grid
+alignment. The difference is the area between the two shock positions, which
+Linear fills and SB does not.
+
+\end{frame}
+
+\begin{frame}{Bump — Error vs.\ $t$, $M:2.50\to2.60$}
+
+\centering
+\includegraphics[width=0.95\linewidth, height=0.70\textheight, keepaspectratio]{deck/bump_Mach_L2_Linf_l2_linf_errors.png}
+
+\vspace{0.2em}
+\small\raggedright
+$L^2$: SB is below Linear across the middle of the interval, \win{$1.18\times$}
+on the band mean, and the whole error budget is down at $10^{-3}$ — this is the
+regime where the interpolation is genuinely accurate, not just relatively
+better. $L^\infty$: \lose{Linear wins} ($7.1\mathrm{e}{-2}$ vs.\
+$8.7\mathrm{e}{-2}$); the peak error is the shock cell itself, and moving the
+shock does not make that cell thinner.
+
+\end{frame}
+
+\begin{frame}{Bump — a Second Band, $M:1.50\to1.60$ ($M_\infty = 1.55$ at $t=0.5$)}
+
+\centering
+\includegraphics[width=0.86\linewidth, height=0.30\textheight, keepaspectratio]{deck/bump2_Mach_BaryCDI_t0.50.png}\\[-0.4em]
+{\scriptsize \win{BaryCDI (SB)}}\\[0.2em]
+\includegraphics[width=0.86\linewidth, height=0.30\textheight, keepaspectratio]{deck/bump2_Mach_Linear_t0.50.png}\\[-0.4em]
+{\scriptsize Linear}
+
+\vspace{0.2em}
+\small At $M=1.5$ the reflected wave is still inside the domain, so the field
+carries \emph{two} interacting shock systems instead of one — a harder transport
+than the $M=2.55$ band, and the drift-free bridge still resolves both.
+
+\end{frame}
+
+\begin{frame}{Bump — Error vs.\ $t$, $M:1.50\to1.60$}
+
+\centering
+\includegraphics[width=0.95\linewidth, height=0.68\textheight, keepaspectratio]{deck/bump2_Mach_L2_Linf_l2_linf_errors.png}
+
+\vspace{0.2em}
+\small\raggedright
+$L^2$ \win{$1.17\times$} below Linear, and here SB also takes $\max_t L^\infty$
+(\win{$0.237$} vs.\ Linear $0.253$ and FFD $0.298$) — the opposite of the
+$M:2.50\to2.60$ band. All three drifts converge on this band
+($\texttt{res}\approx9\mathrm{e}{-8}$), so this is the bridge at its budget, not
+at its cap.
+
+\end{frame}
+
+\section{Results — NACA0012}
+
+\begin{frame}{NACA0012 — the Two Marginals, AoA $2^\circ$, $M:1.80\to1.90$}
+
+\begin{columns}
+\begin{column}{0.5\textwidth}
+\centering
+\includegraphics[width=\linewidth, height=0.76\textheight, keepaspectratio]{deck/naca_Mach_M0_raw.png}\\[-0.3em]
+{\scriptsize Endpoint $M_0 = 1.80$}
+\end{column}
+\begin{column}{0.5\textwidth}
+\centering
+\includegraphics[width=\linewidth, height=0.76\textheight, keepaspectratio]{deck/naca_Mach_M1_raw.png}\\[-0.3em]
+{\scriptsize Endpoint $M_1 = 1.90$}
+\end{column}
+\end{columns}
+
+\end{frame}
+
+\begin{frame}{NACA0012 — Reconstruction at $t=0.5$ ($M_\infty=1.85$, AoA $2^\circ$)}
+
+\begin{columns}
+\begin{column}{0.5\textwidth}
+\centering
+\includegraphics[width=\linewidth, height=0.76\textheight, keepaspectratio]{deck/naca_Mach_BaryCDI_t0.50.png}\\[-0.3em]
+{\scriptsize \win{BaryCDI (SB)}}
+\end{column}
+\begin{column}{0.5\textwidth}
+\centering
+\includegraphics[width=\linewidth, height=0.76\textheight, keepaspectratio]{deck/naca_Mach_Linear_t0.50.png}\\[-0.3em]
+{\scriptsize Linear}
+\end{column}
+\end{columns}
+
+\end{frame}
+
+\begin{frame}{NACA0012 — Error vs.\ $t$, AoA $2^\circ$, $M:1.80\to1.90$}
+
+\centering
+\includegraphics[width=0.99\linewidth, height=0.82\textheight, keepaspectratio]{deck/naca_Mach_L2_Linf_l2_linf_errors.png}
+
+\end{frame}
+
+\begin{frame}{NACA0012 — Absolute Error, AoA $2^\circ$, $M:1.80\to1.90$}
+
+\begin{columns}
+\begin{column}{0.5\textwidth}
+\centering
+\includegraphics[width=\linewidth, height=0.78\textheight, keepaspectratio]{deck/naca_AbsErr_BaryCDI_abs_error.png}\\[-0.3em]
+{\scriptsize $|$BaryCDI $-$ ref$|$}
+\end{column}
+\begin{column}{0.5\textwidth}
+\centering
+\includegraphics[width=\linewidth, height=0.78\textheight, keepaspectratio]{deck/naca_AbsErr_Linear_abs_error.png}\\[-0.3em]
+{\scriptsize $|$Linear $-$ ref$|$}
+\end{column}
+\end{columns}
+
+\end{frame}
+
+\begin{frame}{NACA0012 — the Other Axis: AoA $0^\circ\to1^\circ$ at $M=2.00$}
+
+\begin{columns}
+\begin{column}{0.5\textwidth}
+\centering
+\includegraphics[width=\linewidth, height=0.56\textheight, keepaspectratio]{deck/nacaoa_Mach_BaryCDI_t0.50.png}\\[-0.3em]
+{\scriptsize BaryCDI (SB) at $t=0.5$ — AoA $0.5^\circ$}
+\end{column}
+\begin{column}{0.5\textwidth}
+\centering
+\includegraphics[width=\linewidth, height=0.56\textheight, keepaspectratio]{deck/nacaoa_Mach_Linear_t0.50.png}\\[-0.3em]
+{\scriptsize Linear at $t=0.5$}
+\end{column}
+\end{columns}
+
+\vspace{0.2em}
+\small Same machinery, same marginal, same code path — only the interpolation
+\emph{axis} changes: the two endpoints now differ by $1^\circ$ of incidence
+instead of $0.10$ in Mach. Drift \texttt{null}, $\gamma_{\min}=10^{-2}$ (the
+only AoA band of this case run to completion).
+
+\end{frame}
+
+\begin{frame}{NACA0012 — the AoA Axis Is Where the Method Breaks}
+
+\centering
+\includegraphics[width=0.80\linewidth, height=0.38\textheight, keepaspectratio]{deck/nacaoa_Mach_L2_Linf_l2_linf_errors.png}
+
+\vspace{-0.1em}
+\begin{alertblock}{SB is $40\times$ worse than the linear blend}
+\centering\scriptsize
+\begin{tabular}{@{}lccc@{}}
+\toprule
+ & BaryCDI & Linear & FFD \\
+\midrule
+mean $L^2$      & \lose{1.97e$-$2} & \textbf{4.98e$-$4} & 1.38e$-$3 \\
+$\max_t L^\infty$ & \lose{1.95}    & \textbf{0.115}     & 0.296 \\
+\bottomrule
+\end{tabular}
+\end{alertblock}
+
+\vspace{-0.3em}
+{\scriptsize\raggedright
+A $1^\circ$ change in incidence barely \emph{moves} the wave system — it changes
+its \textbf{amplitude}, and rotates the body itself. The Hessian marginal sees
+almost no displacement to transport, so the bridge invents one and drags the
+wall with it. \textbf{Transport is the wrong prior for this axis.}\par}
+
+\end{frame}
+
+\section{The Mach Sweep}
+
+\begin{frame}{Bump — $L^2$ and $L^\infty$ across the Whole Mach Sweep}
+
+\centering
+\includegraphics[width=\linewidth, height=0.66\textheight, keepaspectratio]{deck/sweep_l2linf_bump.png}
+
+\vspace{0.2em}
+\small\raggedright
+\textbf{$L^2$:} SB is below Linear in \win{19 of 22} bands, median gain
+$1.31\times$, and the ordering is stable across the whole supersonic range.
+\textbf{$L^\infty$:} a genuine tie (SB ahead in 9/22) — the peak error is one
+shock cell, and transporting the shock does not shrink it.
+\textbf{FFD stays below SB at every Mach.}
+
+\end{frame}
+
+\begin{frame}{NACA0012 — $L^2$ and $L^\infty$, AoA $0^\circ$}
+
+\centering
+\includegraphics[width=\linewidth, height=0.66\textheight, keepaspectratio]{deck/sweep_l2linf_naca_aoa0.png}
+
+\vspace{0.2em}
+\small\raggedright
+The airfoil splits in two at $M\approx2$: below it SB wins on $L^2$
+(up to $1.73\times$), above it Linear wins. The $L^\infty$ panel says why —
+past $M\approx2$ SB's peak error jumps to $\mathcal{O}(1)$ while Linear's
+does not.
+
+\end{frame}
+
+\begin{frame}{NACA0012 — $L^2$ and $L^\infty$, AoA $2^\circ$}
+
+\centering
+\includegraphics[width=\linewidth, height=0.66\textheight, keepaspectratio]{deck/sweep_l2linf_naca_aoa2.png}
+
+\vspace{0.2em}
+\small\raggedright
+Same crossover at incidence, same location. The $L^\infty$ spikes line up with
+the Mach values where the reference $C_D$ itself is known to jump: at
+$h=0.025$ the bow-shock standoff spans only $1.3$--$5$ cells, so the captured
+shock snaps between cell rows. \textbf{That is a mesh artefact in the
+reference, and SB inherits it amplified.}
+
+\end{frame}
+
+\begin{frame}{Bump — Aerodynamic Coefficients across the Sweep}
+
+\centering
+\includegraphics[width=\linewidth, height=0.64\textheight, keepaspectratio]{deck/sweep_aero_bump.png}
+
+\vspace{0.2em}
+\small\raggedright
+Grey = the reference level the errors are read against. In the validated band
+($M>1.25$): $\overline{|\Delta C_D|}$ is \lose{$1.47\%$} of $C_D^{\rm ref}$ for
+SB, $0.21\%$ for Linear, $2.29\%$ for FFD. \textbf{Linear wins the integrated
+forces by roughly $5\times$}, even in the bands where it loses the field by
+$1.4\times$.
+
+\end{frame}
+
+\begin{frame}{NACA0012 — Aerodynamic Coefficients, AoA $2^\circ$}
+
+\centering
+\includegraphics[width=\linewidth, height=0.64\textheight, keepaspectratio]{deck/sweep_aero_naca_aoa2.png}
+
+\vspace{0.2em}
+\small\raggedright
+Same verdict on the airfoil: $\overline{|\Delta C_D|} = $ \lose{$3.22\%$} (SB)
+vs.\ $1.02\%$ (Linear) vs.\ $2.72\%$ (FFD) of $C_D^{\rm ref}$.
+
+\end{frame}
+
+\begin{frame}{The Sweep in One Table}
+
+\footnotesize
+Means over the \textbf{validated} bands ($M>1.25$, 18 bands), $\gamma_{\min}=10^{-4}$,
+best drift per case.
+
+\begin{center}
+\begin{tabular}{@{}llccc c cc@{}}
+\toprule
+ & & \multicolumn{3}{c}{mean $L^2$} & & \multicolumn{2}{c}{$\overline{|\Delta C_D|}$ / $C_D^{\rm ref}$} \\
+\cmidrule(lr){3-5}\cmidrule(lr){7-8}
+case & drift & BaryCDI & Linear & FFD & & BaryCDI & Linear \\
+\midrule
+bump             & \texttt{null}       & \win{5.16e$-$3} & 6.77e$-$3 & \textbf{3.17e$-$3} & & \lose{1.47\%} & \textbf{0.21\%} \\
+naca, AoA $0^\circ$ & \texttt{SB}$^2$\texttt{+ffd} & \lose{5.91e$-$3} & \textbf{6.57e$-$3} & \textbf{4.01e$-$3} & & \lose{6.67\%} & \textbf{0.96\%} \\
+naca, AoA $2^\circ$ & \texttt{null}       & \lose{6.33e$-$3} & 6.70e$-$3 & \textbf{4.16e$-$3} & & \lose{3.22\%} & \textbf{1.02\%} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{columns}[T]
+\begin{column}{0.5\textwidth}
+\begin{block}{Where SB wins}
+\begin{itemize}\small
+    \item $L^2$ vs.\ Linear on the bump: \win{19/22} bands.
+    \item $L^2$ vs.\ Linear on the airfoil for $M<2$: up to \win{$1.73\times$}.
+    \item Shock \emph{position} — the physical quantity the marginal encodes.
+\end{itemize}
+\end{block}
+\end{column}
+\begin{column}{0.5\textwidth}
+\begin{block}{Where SB loses}
+\begin{itemize}\small
+    \item vs.\ \textbf{FFD}, at every Mach, on both geometries.
+    \item $L^\infty$: tie on the bump, clear loss on the airfoil above $M\approx2$.
+    \item $C_D$, $C_L$: Linear by $3$--$7\times$.
+\end{itemize}
+\end{block}
+\end{column}
+\end{columns}
+
+\end{frame}
+
+\section{Speed-Ups — the Warm-Start Recap}
+
+\begin{frame}{Speed-Up Is a Property of the Tolerance, Not of the Seed}
+
+\centering
+\includegraphics[width=\linewidth, height=0.80\textheight, keepaspectratio]{deck/speedup_recap.png}
+
+\end{frame}
+
+\begin{frame}{Speed-Up Recap — the Numbers}
+
+\footnotesize
+Diamond $h=0.025$, $M:2.00\to2.50$, averaged over the 9 interpolation times.
+Cold baseline in iterations; $0.889$~ms per solver step.
+
+\begin{center}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+ & \multicolumn{2}{c}{loosest reachable tol $2.2\mathrm{e}{-5}$} & \multicolumn{2}{c}{tightest reachable tol $1.27\mathrm{e}{-5}$} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+seed & iterations & speed-up & iterations & speed-up \\
+\midrule
+cold (baseline)   & 3648 & 1.0$\times$          & 4536 & 1.0$\times$ \\
+Linear            &  354 & 101.5$\times$        & 1057 & 5.9$\times$ \\
+\textbf{BaryCDI (SB)} & 158 & \win{29.7$\times$} &  483 & \win{10.6$\times$} \\
+FFD               &  118 & \textbf{36.0$\times$} & 294 & \textbf{15.7$\times$} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\vspace{0.4em}
+\begin{columns}[T]
+\begin{column}{0.5\textwidth}
+\begin{block}{Stable across the band}
+\begin{tabular}{@{}lcc@{}}
+\toprule
+seed & saved (min) & saved (max) \\
+\midrule
+BaryCDI & 3240 & 4775 \\
+FFD     & 3300 & 4910 \\
+Linear  & 2915 & 4535 \\
+\bottomrule
+\end{tabular}
+\end{block}
+\end{column}
+\begin{column}{0.48\textwidth}
+\small
+The \emph{factor} spans $10\times$ for SB and $231\times$ for Linear across the
+reachable band; the \emph{iterations saved} spans $1.5\times$ for all three.
+Report saved iterations, with the floor stated.
+\end{column}
+\end{columns}
+
+\end{frame}
+
+\begin{frame}{Pricing It: When Does the Bridge Pay for Itself?}
+
+\footnotesize
+One SB run (3-stage ladder to $\gamma=10^{-4}$, all stages converged) costs
+$21.9$~s offline and $0.23$~s to emit all 9 fields. At the tightest reachable
+tolerance:
+
+\begin{center}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+seed & offline (s) & solve/query (s) & saved/query (s) & break-even vs.\ cold \\
+\midrule
+cold              & --     & 4.03 & --   & -- \\
+Linear            & 0.00   & 0.94 & 3.09 & \textbf{immediate} \\
+BaryCDI (SB)      & 21.88  & 0.43 & 3.60 & 6 queries \\
+FFD               & 0.005  & 0.26 & 3.77 & \textbf{immediate} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{alertblock}{The comparison that matters is not against cold}
+\begin{itemize}\small
+    \item Against \textbf{cold}, SB repays its IPFP after \textbf{6 queries} — it works.
+    \item Against \textbf{Linear}, which is free, SB buys only $0.51$~s per query,
+          so the $21.9$~s ladder repays after \lose{$\sim$43 queries}.
+    \item Against \textbf{FFD}, which costs $5$~ms offline and saves \emph{more},
+          SB \lose{never} repays.
+\end{itemize}
+\end{alertblock}
+
+\small The warm-start benefit is real and large, but it is a benefit of
+\emph{having a good initial guess}, and the cheapest good guess wins.
+
+\end{frame}
+
+\begin{frame}{Summary}
+
+\begin{enumerate}
+    \item The method \textbf{transfers} to two geometries it was not built for:
+          a wall-mounted bump with no wedge and no incidence axis, and a
+          rounded-nose airfoil with a permanently detached bow shock.
+    \item On the \textbf{field} in $L^2$ it does what it claims — SB beats the
+          linear blend in \win{19/22} bump bands and up to \win{$1.73\times$} on
+          the airfoil below $M\approx2$ — by placing the shock rather than
+          fading between two of them.
+    \item On \textbf{integrated forces} it does not: Linear is $3$--$7\times$
+          better on $C_D$, because the marginal carries no mass where the
+          forces are computed.
+    \item As a \textbf{warm start} the interpolated field is worth
+          $\sim$3600 solver iterations, a $10.6\times$ speed-up at the tightest
+          reachable tolerance, repaying the IPFP after 6 queries against a cold
+          solve.
+    \item The open problem is unchanged and now confirmed on three geometries:
+          \textbf{SB does not beat the FFD registration it is conditioned on},
+          at any $\gamma$, on any mesh.
+\end{enumerate}
+
+\end{frame}
+
+\end{document}

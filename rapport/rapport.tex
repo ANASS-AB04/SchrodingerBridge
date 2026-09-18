@@ -1,0 +1,327 @@
+% =====================================================================
+%  Rapport de stage — Anass Aboufadel
+%  Bordeaux INP / ENSEIRB-MATMECA · Ingeliance · INRIA
+%  26 mai – 18 septembre 2026
+%
+%  Compilation :
+%      pdflatex rapport && bibtex rapport && pdflatex rapport && pdflatex rapport
+%
+%  NOTE : babel-french n'est pas installé sur cette machine (french.ldf absent),
+%  les conventions francaises sont donc posées à la main plus bas plutôt que par
+%  \usepackage[french]{babel}. Si texlive-lang-french est installé un jour, on
+%  peut remplacer ce bloc par babel et supprimer les \renewcommand.
+%
+%  ÉTAT : pages liminaires + partie 1 rédigées. Les parties 2 à 8 sont écrites
+%  une par une, dans des passes séparées (voir le plan).
+% =====================================================================
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[a4paper,margin=2.4cm]{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{microtype}
+\usepackage{enumitem}
+\usepackage[dvipsnames]{xcolor}
+\usepackage[hidelinks]{hyperref}
+
+% --- Conventions françaises (à la place de babel-french) -------------
+\renewcommand{\contentsname}{Sommaire}
+\renewcommand{\refname}{Références}
+\renewcommand{\figurename}{Figure}
+\renewcommand{\tablename}{Table}
+\renewcommand{\abstractname}{Résumé}
+\frenchspacing
+
+% Guillemets français avec espaces fines insécables.
+\newcommand{\gui}[1]{\mbox{«\,}#1\mbox{\,»}}
+
+% Macros du rapport
+\newcommand{\xv}{\mathbf{x}}
+\newcommand{\Mach}{M_\infty}
+
+\setlength{\parskip}{0.35em}
+
+\begin{document}
+
+% =====================================================================
+%  PAGE DE GARDE
+% =====================================================================
+\begin{titlepage}
+\centering
+
+% Les trois PNG portent de larges marges blanches : les hauteurs ci-dessous
+% sont réglées sur le rendu visuel, pas sur la boîte de l'image.
+\begin{minipage}[c]{0.44\textwidth}
+  \raggedright
+  \includegraphics[height=2.6cm,keepaspectratio]{logos/enseirb-matmeca.png}
+\end{minipage}
+\hfill
+\begin{minipage}[c]{0.44\textwidth}
+  \raggedleft
+  \includegraphics[height=2.0cm,keepaspectratio]{logos/ingeliance.png}
+\end{minipage}
+
+\vspace{1.4cm}
+
+{\scshape\large Rapport de stage de fin d'études\par}
+\vspace{0.3cm}
+{\large Formation d'ingénieur --- filière Matmeca\par}
+
+\vspace{1.2cm}
+
+\rule{\textwidth}{0.4pt}
+\vspace{0.6cm}
+
+{\huge\bfseries Résolution du problème du pont de Schrödinger
+pour la réduction de modèles non linéaires\par}
+
+\vspace{0.6cm}
+{\large\itshape Interpolation de champs aérodynamiques à chocs
+et initialisation de solveurs Euler\par}
+\vspace{0.6cm}
+\rule{\textwidth}{0.4pt}
+
+\vspace{1.2cm}
+
+{\Large\bfseries Anass Aboufadel\par}
+
+\vspace{1.0cm}
+
+\begin{tabular}{r@{\hspace{1.2em}}l}
+  \textbf{Tuteur entreprise} & Mathias Truel \\[0.25em]
+  \textbf{Encadrant école}   & Mathieu Colin \\[0.25em]
+  \textbf{Période}           & 26 mai --- 18 septembre 2026 \\
+\end{tabular}
+
+\vspace{0.8cm}
+
+{\large Stage réalisé pour le Groupe Ingeliance,\\
+accueilli au sein d'une équipe de recherche INRIA\par}
+
+\vfill
+
+\includegraphics[height=1.8cm,keepaspectratio]{logos/inria.png}
+
+\vspace{0.4cm}
+{\small Année universitaire 2025--2026\par}
+
+\end{titlepage}
+
+% =====================================================================
+%  REMERCIEMENTS
+% =====================================================================
+\section*{Remerciements}
+\addcontentsline{toc}{section}{Remerciements}
+
+Je remercie Mathias Truel, mon tuteur, pour sa disponibilité tout au long de ces
+quatre mois, pour les discussions qui ont orienté ce travail et pour m'avoir donné
+accès à son cadre de recalage par déformation de forme libre, sur lequel repose une
+partie des résultats présentés ici.
+
+Je remercie Mathieu Colin d'avoir accepté d'encadrer ce stage du côté de
+l'ENSEIRB-MATMECA et de m'avoir suivi malgré la distance.
+
+Ce travail n'aurait pas été possible sans le solveur développé par Guillaume de
+Romémont, ni sans les cas tests construits par Julien Léger, que je remercie tous
+les deux pour leur aide et pour la qualité du code qu'ils m'ont laissé reprendre.
+Merci enfin à l'ensemble de l'équipe qui m'a accueilli à INRIA pour la bonne
+atmosphère de travail, et au Groupe Ingeliance pour la confiance accordée.
+
+% =====================================================================
+%  RÉSUMÉ / ABSTRACT
+% =====================================================================
+\section*{Résumé}
+\addcontentsline{toc}{section}{Résumé / Abstract}
+
+Les études aérodynamiques paramétriques exigent une résolution complète des équations
+d'Euler pour chaque point de fonctionnement, et les modèles réduits à base linéaire
+échouent dès que l'écoulement contient un choc~: moyenner deux champs dont les
+discontinuités occupent des positions différentes en produit deux, atténuées, au lieu
+d'une seule déplacée. Ce stage examine si le \emph{pont de Schrödinger} — le problème
+de transport optimal régularisé par une entropie — peut fournir l'interpolation
+manquante. La démarche associe à chaque champ de Mach une mesure de probabilité
+concentrée sur ses chocs au moyen d'une métrique hessienne, résout le pont entre ces
+deux mesures par un algorithme de point fixe dont le noyau est un semi-groupe
+discrétisé en volumes finis, puis reconstruit les champs intermédiaires par
+interpolation par déplacement convexe. Trois dérives de référence ont été construites
+pour conditionner le pont aux petites valeurs du paramètre de régularisation, dont une
+formulation auto-conditionnée. La méthode a été évaluée sur 586 interpolations réparties
+sur trois géométries, chacune notée contre neuf solutions de référence. Le pont améliore
+l'erreur $L^2$ par rapport à l'interpolation linéaire dans dix-neuf bandes de Mach sur
+vingt-deux, avec un gain médian de 1,31 et jusqu'à 1,73 sur profil. Utilisé comme
+initialisation du solveur, le champ interpolé économise environ 3600 itérations et
+s'amortit en six requêtes. Il reste cependant en retrait du recalage de formes dont il
+est construit.
+
+\vspace{0.4em}
+\noindent\textbf{Mots-clés}~: pont de Schrödinger, transport optimal entropique,
+réduction de modèles, écoulements compressibles, ondes de choc, volumes finis,
+interpolation par déplacement convexe.
+
+\vspace{1.2em}
+\section*{Abstract}
+
+Parametric aerodynamic studies require a full solution of the Euler equations at every
+operating point, and linear-subspace reduced-order models break down as soon as the flow
+contains a shock: averaging two fields whose discontinuities sit at different locations
+produces two attenuated shocks rather than a single displaced one. This internship
+investigates whether the \emph{Schrödinger bridge} — the entropy-regularised optimal
+transport problem — can supply the missing interpolation. The approach assigns to each
+Mach field a probability measure concentrated on its shocks through a Hessian metric,
+solves the bridge between the two measures with a fixed-point algorithm whose kernel is
+a finite-volume semigroup, and reconstructs intermediate fields by convex displacement
+interpolation. Three reference drifts were built to condition the bridge at small values
+of the regularisation parameter, including a self-conditioned formulation. The method was
+assessed on 586 interpolations across three geometries, each scored against nine
+reference solutions. The bridge improves the $L^2$ error over linear interpolation in
+nineteen Mach bands out of twenty-two, with a median gain of 1.31 and up to 1.73 on an
+airfoil. Used as a solver initialisation, the interpolated field saves roughly 3600
+iterations and pays for itself after six queries. It nevertheless remains behind the
+shape registration from which it is built.
+
+\vspace{0.4em}
+\noindent\textbf{Keywords}: Schrödinger bridge, entropic optimal transport, model order
+reduction, compressible flows, shock waves, finite volumes, convex displacement
+interpolation.
+
+\clearpage
+
+% =====================================================================
+%  SOMMAIRE
+% =====================================================================
+\setcounter{tocdepth}{2}
+\tableofcontents
+\clearpage
+
+% =====================================================================
+%  1. INTRODUCTION
+% =====================================================================
+\section{Introduction}
+
+\subsection{Cadre du stage}
+
+Ce rapport rend compte d'un stage de fin d'études effectué du 26 mai au 18 septembre
+2026 dans le cadre de la formation d'ingénieur de Bordeaux INP --- ENSEIRB-MATMECA,
+filière Matmeca. Le stage a été réalisé pour le Groupe Ingeliance et s'est déroulé au
+sein d'une équipe de recherche d'INRIA, sous le tutorat de Mathias Truel~; Mathieu Colin
+en a assuré l'encadrement académique.
+
+Le travail s'inscrit dans un effort collectif qu'il convient de délimiter d'emblée. Le
+solveur des équations d'Euler employé ici, JAX-FVM, a été développé par Guillaume de
+Romémont~\cite{deromemont2026jaxfvm}~; Julien Léger en a construit les premiers cas
+tests, que ce stage reprend et prolonge en respectant les conventions du code existant.
+Ma contribution ne porte donc pas sur la résolution des équations d'Euler, mais sur ce
+qu'on peut faire des solutions une fois qu'on en possède plusieurs~: les
+\emph{interpoler}. La séparation est précisée au paragraphe~3.2.
+% TODO : remplacer par \ref{sec:solveur} une fois la section 3 rédigée.
+
+L'objectif initial était d'évaluer si le pont de Schrödinger pouvait servir
+d'interpolateur entre solutions de mécanique des fluides. Une fois la méthode
+implémentée et validée, la question s'est naturellement déplacée vers une formulation
+plus exigeante, qui structure la seconde moitié de ce rapport~: qu'apporte le pont
+\emph{par rapport au recalage de formes dont il est lui-même construit}~?
+
+\subsection{Problématique}
+\label{sec:problematique}
+
+Dimensionner une voilure, tracer une polaire, explorer un domaine de vol~: toutes ces
+études demandent de connaître l'écoulement non pas en un point, mais sur une plage de
+paramètres --- nombre de Mach, incidence. Chaque point de cette plage coûte une
+résolution complète des équations d'Euler, et le coût se multiplie par le nombre de
+points désirés. L'objet de la réduction de modèles est de casser cette
+proportionnalité~: calculer peu de solutions, et fabriquer les autres.
+
+La stratégie classique construit une base linéaire à partir de quelques solutions
+calculées --- typiquement par décomposition orthogonale aux valeurs propres --- et
+approche tout nouveau point de fonctionnement par une combinaison linéaire des éléments
+de cette base. Elle est efficace tant que la solution dépend régulièrement du paramètre.
+Elle cesse de l'être en régime transsonique et supersonique, où la solution porte un
+\emph{choc}~: une discontinuité dont la position, et non seulement l'amplitude, dépend du
+paramètre.
+
+L'obstruction est élémentaire, et elle se voit en une dimension. Si $M_0$ et $M_1$
+désignent deux champs identiques à une translation près de leur discontinuité, la
+moyenne pondérée $(1-t)M_0 + tM_1$ ne contient pas un choc à une position intermédiaire~:
+elle contient les \emph{deux} chocs de départ, chacun d'amplitude réduite
+(figure~\ref{fig:creneaux}). Aucun choix de poids ne corrige cela, et aucune base
+linéaire de taille raisonnable n'y remédie --- c'est la lenteur bien connue de la
+décroissance de la largeur de Kolmogorov pour les problèmes dominés par le transport.
+
+\begin{figure}[htbp]
+  \centering
+  \fbox{\begin{minipage}{0.75\textwidth}
+    \vspace{1.4cm}
+    \centering\itshape\small
+    [Figure à produire] Deux créneaux décalés $M_0$, $M_1$ et leur moyenne
+    $\tfrac12(M_0+M_1)$ en une dimension~: la moyenne présente deux marches
+    d'amplitude~$\tfrac12$ au lieu d'une marche unique à mi-distance.
+    \vspace{1.4cm}
+  \end{minipage}}
+  \caption{L'obstruction élémentaire à l'interpolation linéaire de champs à chocs.}
+  \label{fig:creneaux}
+\end{figure}
+
+La voie suivie dans ce stage consiste à ne pas moyenner les valeurs, mais à
+\emph{déplacer} la structure. On associe à chaque champ une mesure de probabilité
+concentrée là où se trouvent ses chocs, on cherche une application qui transporte la
+première mesure sur la seconde, et on se sert de ce déplacement pour reconstruire les
+champs intermédiaires. Le transport optimal fournit le cadre naturel de cette
+construction~; sa régularisation entropique --- le \emph{problème de Schrödinger} --- en
+fournit la version calculable, strictement convexe et résoluble par un algorithme de
+point fixe, qui redonne le transport optimal lorsque la régularisation tend vers zéro.
+
+\subsection{Contributions et organisation du rapport}
+
+Le solveur d'Euler préexiste au stage. Les contributions propres de ce travail sont~:
+
+\begin{enumerate}[leftmargin=1.6em,itemsep=0.2em]
+  \item un module complet de résolution du pont de Schrödinger sur maillage
+        triangulaire non structuré~: algorithme de point fixe en potentiels
+        logarithmiques dont le noyau est un semi-groupe discrétisé en volumes finis,
+        accélération d'Anderson, et recuit du paramètre de régularisation~;
+  \item la construction et la comparaison de trois \emph{dérives de référence}
+        conditionnant le pont --- une dérive analytique déduite de la théorie du choc
+        oblique, une dérive issue d'un recalage par déformation de forme libre, et une
+        dérive auto-conditionnée où le pont sert de référence à sa propre itération
+        suivante~;
+  \item le passage du pont abstrait au champ physique~: extraction de la mesure par
+        métrique hessienne, cartes de transport barycentriques, et reconstruction du
+        champ de Mach par interpolation par déplacement convexe~;
+  \item de nouvelles géométries de test et le corpus paramétrique associé, dont un
+        raffinement de maillage au bord d'attaque qui résout le choc de proue détaché
+        sans renchérir le coût de l'interpolation~;
+  \item un protocole de validation de 586 interpolations comparant systématiquement
+        trois méthodes, et l'application du résultat à l'initialisation du solveur.
+\end{enumerate}
+
+Le rapport suit cet ordre. La section~2 situe le travail dans la littérature. La
+section~3 présente le cadre physique et la chaîne de simulation, en séparant ce qui
+préexiste de ce qui a été ajouté. La section~4 expose le pont de Schrödinger et sa
+résolution numérique, et la section~5 son application à un champ de Mach. La section~6
+rassemble les résultats de validation et leurs limites, la section~7 l'application à
+l'initialisation du solveur, et la section~8 conclut.
+% TODO : convertir ces renvois en \ref{sec:...} au fur et à mesure que les
+% sections 2 à 8 sont rédigées (labels prévus : sec:etat-art, sec:cadre,
+% sec:solveur, sec:pont, sec:champ, sec:resultats, sec:warmstart, sec:conclusion).
+
+% =====================================================================
+%  Parties 2 à 8 — rédigées une par une dans les passes suivantes.
+% =====================================================================
+
+% =====================================================================
+%  BIBLIOGRAPHIE
+% =====================================================================
+\clearpage
+% TODO : retirer ce \nocite{*} une fois toutes les parties rédigées. Il est là
+% pour que les onze entrées de refs.bib soient visibles et relisables dès
+% maintenant, alors que seule JAX-FVM est effectivement citée dans la partie 1.
+\nocite{*}
+\bibliographystyle{plain}
+\bibliography{refs}
+\addcontentsline{toc}{section}{Références}
+
+\end{document}
