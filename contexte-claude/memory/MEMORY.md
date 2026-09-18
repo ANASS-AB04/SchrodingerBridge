@@ -1,0 +1,5 @@
+- [SB does not beat the FFD baseline](sb-does-not-beat-ffd-baseline.md) — wins at every γ AND every mesh; the γ-anneal erases β, which is why
+- [AoA study findings](aoa-study-findings.md) — 576 runs done; AoA-axis transport is amplitude-dominated, SB loses to Linear there; SB² best drift; decomposition is the next step
+- [Diamond mesh-resolution study](mesh-resolution-study-diamond.md) — the h ladder, the 5°/10° geometry trap, what's left to run
+- [naca0012 bow shock under-resolved](naca0012-bow-shock-underresolved.md) — ref C_D/C_L sawtooth vs Mach; nose standoff is 1.3–5 cells; hits all rounded-LE airfoils
+- [CALI3 storage](cali3-storage.md) — home 60 GB (full 2026-09-11); run from /scratch/aaboufadel, no backup there
