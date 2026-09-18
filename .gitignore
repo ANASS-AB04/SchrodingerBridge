@@ -27,3 +27,6 @@ outputs/**/*.gif
 *.synctex.gz
 SB/*.out
 SB/*.log
+
+# Transcripts convertis : à relire avant de committer (cf. contexte-claude/README.md)
+contexte-claude/transcripts/

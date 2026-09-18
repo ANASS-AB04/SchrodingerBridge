@@ -44,6 +44,21 @@ done
 grep -rcE 'sk-(or|ant)-[A-Za-z0-9_-]{16,}' transcripts/   # doit donner 0 partout
 ```
 
-Puis les archiver hors dépôt public, ou les ajouter ici après vérification.
+### Conversion en Markdown lisible
+
+Le script `jsonl_to_md.py` fait mieux que le `sed` ci-dessus : il produit un
+`.md` par conversation, scrube les clés, et tronque les sorties d'outils (qui
+représentent l'essentiel des 55 Mo et n'ont aucune valeur pour reprendre le
+travail), tout en conservant le texte des échanges intégralement. Il refuse
+d'écrire un fichier où une clé subsisterait.
+
+```bash
+python3 contexte-claude/jsonl_to_md.py
+# option : --max-tool-chars 5000 pour garder plus de sortie d'outils
+```
+
+Les `.md` atterrissent dans `contexte-claude/transcripts/`. Relire avant de
+committer, puis `git add contexte-claude/transcripts`.
+
 Révoquer la clé OpenRouter dans tous les cas : elle reste dans l'historique
 shell du PC rendu.
